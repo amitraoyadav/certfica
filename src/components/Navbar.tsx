@@ -36,7 +36,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onRequestMainAdmin,
   onLogoutMainAdmin,
 }) => {
-  const isVerificationMode = currentTab === 'verify' || (!isAdmin && currentTab === 'view-certificate');
+  const isVerificationMode = !isAdmin && (currentTab === 'verify' || currentTab === 'view-certificate');
 
   return (
     <header className="no-print bg-[#0d2847] text-white sticky top-0 z-40 shadow-md">
@@ -172,7 +172,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 )}
               </>
             ) : isAdmin ? (
-              /* CERTIFICATE_MAKER: Strictly restricted to Make Certificate + Discreet Main Core Admin button */
+              /* CERTIFICATE_MAKER: Make Certificate, Verify Certificate, and Discreet Main Core Admin button */
               <>
                 <button
                   id="nav-tab-create"
@@ -186,6 +186,20 @@ export const Navbar: React.FC<NavbarProps> = ({
                 >
                   <PlusCircle className="w-4 h-4 text-emerald-200" />
                   Make Certificate
+                </button>
+
+                <button
+                  id="nav-tab-maker-verify"
+                  type="button"
+                  onClick={() => onSelectTab('verify')}
+                  className={`px-3 py-2 rounded-md text-sm font-medium flex items-center gap-1.5 transition-colors cursor-pointer ${
+                    currentTab === 'verify'
+                      ? 'bg-slate-800 text-white shadow-inner'
+                      : 'text-slate-200 hover:bg-[#163a63] hover:text-white'
+                  }`}
+                >
+                  <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                  <span>Verify Certificate</span>
                 </button>
 
                 {onRequestMainAdmin && (
@@ -366,19 +380,31 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <button
                   type="button"
                   onClick={() => onSelectTab('create')}
-                  className="px-3 py-2 rounded-lg font-bold flex items-center gap-1.5 bg-emerald-600 text-white min-h-[40px]"
+                  className={`px-3 py-2 rounded-lg font-bold flex items-center gap-1.5 min-h-[40px] ${
+                    currentTab === 'create' ? 'bg-emerald-600 text-white' : 'bg-emerald-700/60 text-white'
+                  }`}
                 >
                   <PlusCircle className="w-3.5 h-3.5" />
-                  Make Certificate
+                  Make Cert
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onSelectTab('verify')}
+                  className={`px-2.5 py-2 rounded-lg font-medium flex items-center gap-1.5 min-h-[40px] ${
+                    currentTab === 'verify' ? 'bg-slate-800 text-white font-bold' : 'text-slate-200 bg-white/10'
+                  }`}
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                  Verify
                 </button>
                 {onRequestMainAdmin && (
                   <button
                     type="button"
                     onClick={onRequestMainAdmin}
-                    className="px-3 py-2 rounded-lg font-semibold flex items-center gap-1.5 text-slate-200 bg-white/10 border border-white/15 min-h-[40px]"
+                    className="px-2.5 py-2 rounded-lg font-semibold flex items-center gap-1.5 text-slate-200 bg-white/10 border border-white/15 min-h-[40px]"
                   >
                     <KeyRound className="w-3.5 h-3.5 text-amber-300" />
-                    Main Core Admin
+                    Core Admin
                   </button>
                 )}
               </div>

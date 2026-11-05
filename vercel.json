@@ -4,7 +4,7 @@
   "outputDirectory": "dist",
   "functions": {
     "api/**/*.ts": {
-      "includeFiles": "{data/**,firebase-applet-config.json,api/_*}"
+      "includeFiles": "{data/**,src/data/**,firebase-applet-config.json,api/**}"
     }
   },
   "rewrites": [

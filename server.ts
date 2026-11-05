@@ -5176,10 +5176,10 @@ Return strictly raw JSON.`;
 export const app: express.Application = configureExpressApp();
 
 export async function startServer() {
+  const distPath = path.join(process.cwd(), 'dist');
   const isProd =
     process.env.NODE_ENV === 'production' &&
-    !process.argv[1]?.endsWith('server.ts') &&
-    !process.argv[1]?.endsWith('.ts');
+    fs.existsSync(distPath);
 
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
