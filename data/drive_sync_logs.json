@@ -1,0 +1,30 @@
+[
+  {
+    "id": "sync-log-1793703105457-4df5cf",
+    "timestamp": "2026-11-03T10:51:45.457Z",
+    "action": "SYNC",
+    "result": "SUCCESS",
+    "details": "Main Site Incremental Sync: Found 934 on Main Site, imported 0 new records, matched 934 existing records. Total destination count: 937."
+  },
+  {
+    "id": "sync-log-1791374949843-05b709",
+    "timestamp": "2026-10-07T12:09:09.843Z",
+    "action": "BACKUP",
+    "result": "SUCCESS",
+    "details": "Created versioned database backup snapshot certificate-database-2026-10-07-0128.json (221 certificates)."
+  },
+  {
+    "id": "sync-log-1790880814476-725e4d",
+    "timestamp": "2026-10-01T18:53:34.476Z",
+    "action": "RESTORE",
+    "result": "SUCCESS",
+    "details": "Restored 0 missing certificates from backup (Skipped 16 existing)."
+  },
+  {
+    "id": "sync-log-1790880814472-352898",
+    "timestamp": "2026-10-01T18:53:34.472Z",
+    "action": "BACKUP",
+    "result": "SUCCESS",
+    "details": "Created versioned database backup snapshot certificate-database-2026-10-01-0002.json (16 certificates)."
+  }
+]

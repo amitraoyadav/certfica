@@ -1,0 +1,163 @@
+{
+  "entities": {
+    "Certificate": {
+      "title": "Certificate",
+      "description": "Official Vehicle Scrapping Certificate Record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "certificateNumber": { "type": "string", "maxLength": 64 },
+        "scrappingRegistrationNumber": { "type": "string", "maxLength": 64 },
+        "ownerName": { "type": "string", "maxLength": 500 },
+        "address": { "type": "string", "maxLength": 2000 },
+        "idProofNumber": { "type": "string", "maxLength": 256 },
+        "vehicleRegistrationNumber": { "type": "string", "maxLength": 128 },
+        "chassisNumber": { "type": "string", "maxLength": 256 },
+        "engineNumber": { "type": "string", "maxLength": 256 },
+        "showFullChassisEngine": { "type": "boolean" },
+        "make": { "type": "string", "maxLength": 500 },
+        "model": { "type": "string", "maxLength": 500 },
+        "location": { "type": "string", "maxLength": 500 },
+        "yearOfManufacture": { "type": "string", "maxLength": 64 },
+        "dateOfHandover": { "type": "string", "maxLength": 64 },
+        "dateOfIssue": { "type": "string", "maxLength": 64 },
+        "qrToken": { "type": "string", "maxLength": 128 },
+        "verificationUrl": { "type": "string", "maxLength": 500 },
+        "status": { "type": "string", "enum": ["VALID", "CANCELLED", "SUPERSEDED", "REVOKED"] },
+        "isLocked": { "type": "boolean" },
+        "isImmutable": { "type": "boolean" },
+        "version": { "type": "number" },
+        "dataHash": { "type": "string", "maxLength": 128 },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 64 }
+      },
+      "required": [
+        "id",
+        "certificateNumber",
+        "scrappingRegistrationNumber",
+        "ownerName",
+        "vehicleRegistrationNumber",
+        "chassisNumber",
+        "engineNumber",
+        "make",
+        "model",
+        "dateOfHandover",
+        "dateOfIssue",
+        "qrToken",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ReservedCertificateNumber": {
+      "title": "ReservedCertificateNumber",
+      "description": "Unique index lock for issued certificate numbers",
+      "type": "object",
+      "properties": {
+        "certificateNumber": { "type": "string", "maxLength": 64 },
+        "certificateId": { "type": "string", "maxLength": 128 },
+        "reservedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["certificateNumber", "certificateId", "reservedAt"]
+    },
+    "ReservedScrappingNumber": {
+      "title": "ReservedScrappingNumber",
+      "description": "Unique index lock for issued scrapping registration numbers",
+      "type": "object",
+      "properties": {
+        "scrappingRegistrationNumber": { "type": "string", "maxLength": 64 },
+        "certificateId": { "type": "string", "maxLength": 128 },
+        "reservedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["scrappingRegistrationNumber", "certificateId", "reservedAt"]
+    },
+    "SystemSettings": {
+      "title": "SystemSettings",
+      "description": "Authoritative sequence watermarks and company configuration",
+      "type": "object",
+      "properties": {
+        "companyName": { "type": "string", "maxLength": 200 },
+        "companySubtitle": { "type": "string", "maxLength": 200 },
+        "address": { "type": "string", "maxLength": 500 },
+        "phone": { "type": "string", "maxLength": 64 },
+        "website": { "type": "string", "maxLength": 256 },
+        "signatoryTitle": { "type": "string", "maxLength": 128 },
+        "certificatePrefix": { "type": "string", "maxLength": 32 },
+        "certificateNextSeq": { "type": "number" },
+        "scrappingPrefix": { "type": "string", "maxLength": 32 },
+        "scrappingNextSeq": { "type": "number" },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["certificateNextSeq", "scrappingNextSeq"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable audit ledger entry",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "action": { "type": "string", "maxLength": 64 },
+        "certificateId": { "type": "string", "maxLength": 128 },
+        "certificateNumber": { "type": "string", "maxLength": 64 },
+        "details": { "type": "string", "maxLength": 2000 },
+        "performedBy": { "type": "string", "maxLength": 128 },
+        "timestamp": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "action", "timestamp"]
+    },
+    "Admin": {
+      "title": "Admin",
+      "description": "Authorized Administrator Account",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 200 },
+        "createdAt": { "type": "string", "format": "date-time", "maxLength": 64 }
+      },
+      "required": ["uid", "email", "createdAt"]
+    },
+    "ServerConnectionTest": {
+      "title": "ServerConnectionTest",
+      "description": "Ephemeral Server Connection & Test Certificate Verification Record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^srv_probe_[a-zA-Z0-9_\\-]+$" },
+        "probeKey": { "type": "string", "maxLength": 64 },
+        "purpose": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time", "maxLength": 64 }
+      },
+      "required": ["id", "probeKey", "purpose", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/certificates/{certificateId}": {
+      "schema": { "$ref": "#/entities/Certificate" },
+      "description": "Immutable vehicle scrapping certificates collection"
+    },
+    "/reserved_certificate_numbers/{certKey}": {
+      "schema": { "$ref": "#/entities/ReservedCertificateNumber" },
+      "description": "Atomic uniqueness lock index for certificate numbers"
+    },
+    "/reserved_scrapping_numbers/{scrapKey}": {
+      "schema": { "$ref": "#/entities/ReservedScrappingNumber" },
+      "description": "Atomic uniqueness lock index for scrapping registration numbers"
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/SystemSettings" },
+      "description": "System sequence settings and company configuration"
+    },
+    "/audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Immutable audit log collection"
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/Admin" },
+      "description": "Trusted administrator directory"
+    },
+    "/server_connection_tests/{testId}": {
+      "schema": { "$ref": "#/entities/ServerConnectionTest" },
+      "description": "Temporary test collection used solely for server read/write/delete connectivity verification"
+    }
+  }
+}

@@ -1,0 +1,177 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'raoamityadavak123@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isServerAuthorized(data) {
+      return isAdmin() || (
+        'serverWriteToken' in data &&
+        data.serverWriteToken is string &&
+        data.serverWriteToken.size() == 32 &&
+        data.serverWriteToken == 'ps_srv_tx_auth_9f8e7d6c5b4a_2026'
+      );
+    }
+
+    function isValidAdmin(data) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'createdAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 200 &&
+        data.createdAt is string && data.createdAt.size() >= 1 && data.createdAt.size() <= 64;
+    }
+
+    function isValidConnectionTest(data) {
+      return data.keys().hasAll(['id', 'probeKey', 'purpose', 'createdAt']) &&
+        data.id is string && data.id.size() >= 11 && data.id.size() <= 128 && data.id.matches('^srv_probe_[a-zA-Z0-9_\\-]+$') &&
+        data.probeKey is string && data.probeKey.size() == 31 && data.probeKey == 'ps_server_diagnostic_probe_2026' &&
+        data.purpose is string && data.purpose.size() >= 1 && data.purpose.size() <= 128 &&
+        data.createdAt is string && data.createdAt.size() >= 1 && data.createdAt.size() <= 64;
+    }
+
+    function isValidCertificate(data) {
+      return data.keys().hasAll([
+          'id', 'certificateNumber', 'scrappingRegistrationNumber', 'ownerName',
+          'vehicleRegistrationNumber', 'chassisNumber', 'engineNumber', 'make',
+          'model', 'dateOfHandover', 'dateOfIssue', 'qrToken', 'status',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.certificateNumber is string && data.certificateNumber.size() >= 1 && data.certificateNumber.size() <= 128 &&
+        data.scrappingRegistrationNumber is string && data.scrappingRegistrationNumber.size() >= 1 && data.scrappingRegistrationNumber.size() <= 128 &&
+        data.ownerName is string && data.ownerName.size() >= 1 && data.ownerName.size() <= 500 &&
+        (!('address' in data) || data.address == null || (data.address is string && data.address.size() <= 2000)) &&
+        (!('idProofNumber' in data) || data.idProofNumber == null || (data.idProofNumber is string && data.idProofNumber.size() <= 256)) &&
+        data.vehicleRegistrationNumber is string && data.vehicleRegistrationNumber.size() >= 1 && data.vehicleRegistrationNumber.size() <= 128 &&
+        data.chassisNumber is string && data.chassisNumber.size() >= 1 && data.chassisNumber.size() <= 256 &&
+        data.engineNumber is string && data.engineNumber.size() >= 1 && data.engineNumber.size() <= 256 &&
+        (!('showFullChassisEngine' in data) || data.showFullChassisEngine == null || data.showFullChassisEngine is bool) &&
+        data.make is string && data.make.size() >= 1 && data.make.size() <= 500 &&
+        data.model is string && data.model.size() >= 1 && data.model.size() <= 500 &&
+        (!('location' in data) || data.location == null || (data.location is string && data.location.size() <= 500)) &&
+        (!('yearOfManufacture' in data) || data.yearOfManufacture == null || (data.yearOfManufacture is string && data.yearOfManufacture.size() <= 64)) &&
+        data.dateOfHandover is string && data.dateOfHandover.size() >= 1 && data.dateOfHandover.size() <= 64 &&
+        data.dateOfIssue is string && data.dateOfIssue.size() >= 1 && data.dateOfIssue.size() <= 64 &&
+        data.qrToken is string && data.qrToken.size() <= 128 && data.qrToken.size() >= 1 &&
+        (!('verificationUrl' in data) || data.verificationUrl == null || (data.verificationUrl is string && data.verificationUrl.size() <= 500)) &&
+        data.status is string && data.status in ['VALID', 'CANCELLED', 'SUPERSEDED', 'REVOKED'] &&
+        data.createdAt is string && data.createdAt.size() >= 1 && data.createdAt.size() <= 64 &&
+        data.updatedAt is string && data.updatedAt.size() >= 1 && data.updatedAt.size() <= 64;
+    }
+
+    function isValidReservedCertNumber(data) {
+      return data.keys().hasAll(['certificateNumber', 'certificateId', 'reservedAt']) &&
+        data.certificateNumber is string && data.certificateNumber.size() >= 1 && data.certificateNumber.size() <= 64 &&
+        data.certificateId is string && data.certificateId.size() >= 1 && data.certificateId.size() <= 128 &&
+        data.reservedAt is string && data.reservedAt.size() >= 1 && data.reservedAt.size() <= 64;
+    }
+
+    function isValidReservedScrapNumber(data) {
+      return data.keys().hasAll(['scrappingRegistrationNumber', 'certificateId', 'reservedAt']) &&
+        data.scrappingRegistrationNumber is string && data.scrappingRegistrationNumber.size() >= 1 && data.scrappingRegistrationNumber.size() <= 64 &&
+        data.certificateId is string && data.certificateId.size() >= 1 && data.certificateId.size() <= 128 &&
+        data.reservedAt is string && data.reservedAt.size() >= 1 && data.reservedAt.size() <= 64;
+    }
+
+    function isValidSettings(data) {
+      return data.keys().hasAll(['certificateNextSeq', 'scrappingNextSeq']) &&
+        data.certificateNextSeq is number && data.certificateNextSeq >= 1000 &&
+        data.scrappingNextSeq is number && data.scrappingNextSeq >= 1000;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['id', 'action', 'timestamp']) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+        data.action is string && data.action.size() >= 1 && data.action.size() <= 64 &&
+        data.timestamp is string && data.timestamp.size() >= 1 && data.timestamp.size() <= 64;
+    }
+
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && (request.auth.uid == adminId || isAdmin());
+      allow list: if false;
+      allow create: if isAdmin() && isValidId(adminId) && isValidAdmin(incoming()) && incoming().uid == adminId;
+      allow update: if isAdmin() && isValidId(adminId) && isValidAdmin(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['email']);
+      allow delete: if isAdmin() && isValidId(adminId);
+    }
+
+    match /server_connection_tests/{testId} {
+      allow get: if isValidId(testId) && testId.matches('^srv_probe_[a-zA-Z0-9_\\-]+$') && (resource == null || resource.data.probeKey == 'ps_server_diagnostic_probe_2026');
+      allow list: if false;
+      allow create: if isValidId(testId) && testId.matches('^srv_probe_[a-zA-Z0-9_\\-]+$') && isValidConnectionTest(incoming()) && incoming().id == testId;
+      allow update: if false;
+      allow delete: if isValidId(testId) && testId.matches('^srv_probe_[a-zA-Z0-9_\\-]+$') && resource.data.probeKey == 'ps_server_diagnostic_probe_2026';
+    }
+
+    match /certificates/{certificateId} {
+      allow get: if isValidId(certificateId) && (isAdmin() || resource == null || resource.data.status in ['VALID', 'CANCELLED', 'SUPERSEDED', 'REVOKED']);
+      allow list: if resource.data.status in ['VALID', 'CANCELLED', 'SUPERSEDED', 'REVOKED'];
+      allow create: if isValidId(certificateId) && isValidCertificate(incoming()) && incoming().id == certificateId && isServerAuthorized(incoming());
+      allow update: if isValidId(certificateId) && isValidCertificate(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().certificateNumber == existing().certificateNumber &&
+        incoming().scrappingRegistrationNumber == existing().scrappingRegistrationNumber &&
+        incoming().qrToken == existing().qrToken &&
+        incoming().createdAt == existing().createdAt &&
+        isServerAuthorized(incoming());
+      allow delete: if isAdmin() && isValidId(certificateId);
+    }
+
+    match /reserved_certificate_numbers/{certKey} {
+      allow get: if isValidId(certKey) && (resource == null || resource.data.certificateNumber is string);
+      allow list: if false;
+      allow create: if isValidId(certKey) && isValidReservedCertNumber(incoming()) && isServerAuthorized(incoming());
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    match /reserved_scrapping_numbers/{scrapKey} {
+      allow get: if isValidId(scrapKey) && (resource == null || resource.data.scrappingRegistrationNumber is string);
+      allow list: if false;
+      allow create: if isValidId(scrapKey) && isValidReservedScrapNumber(incoming()) && isServerAuthorized(incoming());
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    match /settings/{settingId} {
+      allow get: if isValidId(settingId) && (resource == null || resource.data.certificateNextSeq is number);
+      allow list: if false;
+      allow create, update: if isValidId(settingId) && isValidSettings(incoming()) && isServerAuthorized(incoming());
+      allow delete: if false;
+    }
+
+    match /audit_logs/{logId} {
+      allow get: if isValidId(logId) && (isAdmin() || resource == null || resource.data.action is string);
+      allow list: if resource.data.action is string && resource.data.action.size() <= 64;
+      allow create: if isValidId(logId) && isValidAuditLog(incoming()) && incoming().id == logId && isServerAuthorized(incoming());
+      allow update: if false;
+      allow delete: if false;
+    }
+  }
+}

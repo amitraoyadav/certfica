@@ -1,0 +1,14 @@
+{
+  "companyName": "PARIVAHAN SCRAPPERS",
+  "companySubtitle": "A Unit OF Scrapping Yard Ltd.",
+  "address": "B12, Dwarka, New Delhi.",
+  "phone": "8506925495",
+  "website": "https://parivahan-scrappers.netlify.app/",
+  "signatoryTitle": "Authorised Signatory",
+  "certificatePrefix": "PS/26/R",
+  "certificateNextSeq": 1000825,
+  "scrappingPrefix": "REG-C",
+  "scrappingNextSeq": 273664,
+  "warnDuplicateVehicle": true,
+  "adminUsername": "pscrappers"
+}
