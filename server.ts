@@ -71,6 +71,11 @@ import {
   getDatabaseCertificatesAsync,
   getFirestoreReadOnlyStatus,
   isLiveCertificateIssuanceEnabled,
+  getRecentCertificatesForMakerAsync,
+  authenticateCoreAdminPassword,
+  changeCoreAdminPasswordServer,
+  isRequestCoreAdminAsync,
+  createAndSaveCertificateRecordAsync,
 } from './api/_db.js';
 import {
   verifyAdminCredentials,
@@ -79,8 +84,6 @@ import {
   buildSessionCookie,
   ADMIN_SESSION_TIMEOUT_MS,
   verifyMainAdminPassword as verifyMainAdminPass,
-  createMainAdminToken,
-  isMainAdminTokenValid,
   MAIN_ADMIN_TIMEOUT_MS,
   verifyProtectedActionPassword,
 } from './api/_auth.js';
@@ -90,11 +93,10 @@ function fetchFromLiveProduction(endpoint: string): Promise<any> {
 }
 
 // Server-side protected authorization secret (Never exposed to frontend code or client storage)
-const MAIN_ADMIN_PASSWORD = process.env.MAIN_ADMIN_PASSWORD || 'Scrapbyparivahan';
 const ADMIN_DELETION_PASSWORD = 'Admin00';
 const ADMIN_PROTECTED_PASSWORD = process.env.ADMIN_PROTECTED_PASSWORD || process.env.ADMIN_DELETE_PASSWORD || 'Scrap00';
 
-// Main Admin Session Store (15-minute inactivity timeout)
+// Main Admin Session Store (12-hour session timeout)
 const MAIN_ADMIN_SESSION_TIMEOUT_MS = MAIN_ADMIN_TIMEOUT_MS;
 interface MainAdminSession {
   token: string;
@@ -102,17 +104,6 @@ interface MainAdminSession {
   lastActivity: number;
 }
 const mainAdminSessions = new Map<string, MainAdminSession>();
-
-function isMainAdmin(req?: express.Request): boolean {
-  if (!req) return false;
-  const headerToken =
-    (typeof req.headers?.['x-main-admin-token'] === 'string' ? req.headers['x-main-admin-token'] : '') ||
-    (typeof req.query?.mainAdminToken === 'string' ? req.query.mainAdminToken : '');
-  if (headerToken && isMainAdminTokenValid(headerToken)) {
-    return true;
-  }
-  return isRequestAdmin(req);
-}
 
 function verifyMainAdminPassword(provided?: string): boolean {
   return verifyMainAdminPass(provided);
@@ -1088,45 +1079,59 @@ export function configureExpressApp(): express.Application {
     return res.json({
       success: true,
       token,
-      user: { username: cleanUser, role: 'administrator' },
+      role: 'CERTIFICATE_MAKER',
+      user: { username: cleanUser, role: 'CERTIFICATE_MAKER' },
     });
   });
 
   // Auth: Me
-  app.get('/api/auth/me', (req, res) => {
-    if (isAdmin(req)) {
+  app.get('/api/auth/me', async (req, res) => {
+    const isMaker = isAdmin(req);
+    const isCore = await isRequestCoreAdminAsync(req);
+    if (isMaker || isCore) {
       const settings = getSettings();
       res.json({
         authenticated: true,
-        user: { username: settings.adminUsername || 'pscrappers', role: 'administrator' },
+        role: isCore ? 'MAIN_CORE_ADMIN' : 'CERTIFICATE_MAKER',
+        isMainAdmin: isCore,
+        user: {
+          username: settings.adminUsername || 'pscrappers',
+          role: isCore ? 'MAIN_CORE_ADMIN' : 'CERTIFICATE_MAKER',
+        },
       });
     } else {
       res.status(401).json({ authenticated: false });
     }
   });
 
-  // Auth: Logout (clears HttpOnly ps_admin_session cookie)
+  // Auth: Logout (clears HttpOnly session cookies)
   app.post('/api/auth/logout', (_req, res) => {
-    res.setHeader('Set-Cookie', buildSessionCookie('ps_admin_session', '', 0));
+    res.setHeader('Set-Cookie', [
+      buildSessionCookie('ps_admin_session', '', 0),
+      buildSessionCookie('ps_core_admin_session', '', 0),
+      buildSessionCookie('ps_main_admin_session', '', 0),
+    ]);
     res.json({ success: true, message: 'Logged out of administrator session.' });
   });
 
-  // Public: Check next sequential number without consuming it
-  const handleNextNumbers = (req: express.Request, res: express.Response) => {
+  // Public: Check next random unique numbers without consuming them
+  const handleNextNumbers = async (req: express.Request, res: express.Response) => {
     const settings = getSettings();
-    const certs = getCertificates();
+    const certs = await getDatabaseCertificatesAsync();
     const reserved = getReservedNumbers();
 
     const { candidateCertNo, candidateScrapNo } = getNextUniqueSequenceNumbers(certs, reserved, settings);
 
     res.json({
       nextCertificateNumber: candidateCertNo,
+      nextScrappingNumber: candidateScrapNo,
       nextScrappingRegistrationNumber: candidateScrapNo,
       certificateNumber: candidateCertNo,
       scrappingRegistrationNumber: candidateScrapNo,
     });
   };
 
+  app.get('/api/next-numbers', handleNextNumbers);
   app.get('/api/certificates/next-numbers', handleNextNumbers);
   app.get('/api/certificates/next-number', handleNextNumbers);
 
@@ -1200,48 +1205,91 @@ export function configureExpressApp(): express.Application {
     res.json({ exists: false });
   });
 
-  // Main Admin Authentication Endpoints
-  app.post('/api/auth/verify-main-admin', (req, res) => {
+  // Main Core Admin Authentication Endpoints (Firestore Hashed Password + Session Versioning)
+  app.post('/api/auth/verify-main-admin', async (req, res) => {
     const { password } = req.body || {};
-    if (!password || !verifyMainAdminPassword(String(password))) {
+    const authResult = await authenticateCoreAdminPassword(String(password ?? ''));
+    if (!authResult.authenticated || !authResult.token) {
       recordAuditLog({
         certificateId: 'AUTH',
         certificateNumber: 'MAIN-ADMIN',
         action: 'MAIN_ADMIN_AUTH_FAILED',
         actor: 'user',
-        details: 'Failed Main Admin elevation attempt with incorrect password.',
+        details: 'Failed Main Core Admin elevation attempt with incorrect password.',
       }, req);
       return res.status(401).json({
         success: false,
-        message: 'Invalid Main Admin password. Access denied.',
+        message: 'Invalid Main Core Admin password. Access denied.',
       });
     }
 
     const now = Date.now();
-    const sig = crypto
-      .createHmac('sha256', MAIN_ADMIN_PASSWORD)
-      .update(`main-admin:${now}`)
-      .digest('hex');
-    const token = `ma.${now}.${sig}`;
-    mainAdminSessions.set(token, {
-      token,
+    mainAdminSessions.set(authResult.token, {
+      token: authResult.token,
       createdAt: now,
       lastActivity: now,
     });
+
+    res.setHeader(
+      'Set-Cookie',
+      buildSessionCookie('ps_core_admin_session', authResult.token, MAIN_ADMIN_SESSION_TIMEOUT_MS)
+    );
 
     recordAuditLog({
       certificateId: 'AUTH',
       certificateNumber: 'MAIN-ADMIN',
       action: 'MAIN_ADMIN_AUTH_SUCCESS',
       actor: 'main-admin',
-      details: 'Main Admin privileges elevated successfully with valid master password.',
+      details: 'Main Core Admin privileges unlocked successfully.',
     }, req);
 
     return res.json({
       success: true,
-      token,
+      token: authResult.token,
+      role: 'MAIN_CORE_ADMIN',
+      sessionVersion: authResult.sessionVersion,
       expiresInMs: MAIN_ADMIN_SESSION_TIMEOUT_MS,
-      message: 'Main Admin privileges verified successfully. Full database unlocked for 15 minutes.',
+      message: 'Main Core Admin privileges verified successfully.',
+    });
+  });
+
+  app.post('/api/auth/change-main-admin-password', async (req, res) => {
+    const isCore = await isRequestCoreAdminAsync(req);
+    if (!isCore) {
+      return res.status(403).json({
+        success: false,
+        message: 'Main Core Admin session required to change the Main Admin password.',
+      });
+    }
+
+    const oldPassword = String(req.body?.oldPassword ?? '').trim();
+    const newPassword = String(req.body?.newPassword ?? '').trim();
+    const confirmNewPassword = String(req.body?.confirmNewPassword ?? req.body?.confirmPassword ?? '').trim();
+
+    const changeResult = await changeCoreAdminPasswordServer(oldPassword, newPassword, confirmNewPassword);
+    if (!changeResult.success) {
+      return res.status(changeResult.statusCode).json({
+        success: false,
+        message: changeResult.message,
+      });
+    }
+
+    mainAdminSessions.clear();
+    res.setHeader('Set-Cookie', buildSessionCookie('ps_core_admin_session', '', 0));
+
+    recordAuditLog({
+      certificateId: 'AUTH',
+      certificateNumber: 'MAIN-ADMIN',
+      action: 'MAIN_ADMIN_AUTH_SUCCESS',
+      actor: 'main-admin',
+      details: `Main Core Admin password changed and session version incremented to v${changeResult.sessionVersion}.`,
+    }, req);
+
+    return res.json({
+      success: true,
+      sessionInvalidated: true,
+      sessionVersion: changeResult.sessionVersion,
+      message: changeResult.message,
     });
   });
 
@@ -1254,31 +1302,53 @@ export function configureExpressApp(): express.Application {
       mainAdminSessions.delete(token.trim());
     }
 
+    res.setHeader('Set-Cookie', [
+      buildSessionCookie('ps_core_admin_session', '', 0),
+      buildSessionCookie('ps_main_admin_session', '', 0),
+    ]);
+
     return res.json({
       success: true,
-      message: 'Main Admin session revoked. Access reverted to protected default.',
+      message: 'Main Core Admin session revoked. Access reverted to Certificate Maker mode.',
     });
   });
 
-  app.get('/api/auth/main-admin-status', (req, res) => {
-    const elevated = isMainAdmin(req);
+  app.get('/api/auth/main-admin-status', async (req, res) => {
+    const isCore = await isRequestCoreAdminAsync(req);
+    const isMaker = isAdmin(req);
     return res.json({
-      isMainAdmin: elevated,
+      authenticated: isCore,
+      isMainAdmin: isCore,
+      role: isCore ? 'MAIN_CORE_ADMIN' : isMaker ? 'CERTIFICATE_MAKER' : 'PUBLIC',
     });
   });
 
-  // Dashboard Stats
+  // Recent 5 Certificates for Certificate Maker
+  app.get('/api/certificates/recent', async (req, res) => {
+    const isMaker = isAdmin(req);
+    const isCore = await isRequestCoreAdminAsync(req);
+    if (!isMaker && !isCore) {
+      return res.status(401).json({
+        message: 'Certificate Maker login required to view recent certificates.',
+      });
+    }
+    const recentFive = await getRecentCertificatesForMakerAsync(5);
+    return res.json(recentFive);
+  });
+
+  // Dashboard Stats (Restricted strictly to MAIN_CORE_ADMIN)
   app.get('/api/stats', async (req, res) => {
+    const isCore = await isRequestCoreAdminAsync(req);
+    if (!isCore) {
+      return res.status(isAdmin(req) ? 403 : 401).json({
+        message: 'Main Core Admin access required to view full database statistics and total certificate counts.',
+      });
+    }
     const certs = await getDatabaseCertificatesAsync();
 
     const sortedAll = [...certs].sort((a, b) => {
-      const mA = String(a.certificateNumber || '').match(/(\d+)$/);
-      const mB = String(b.certificateNumber || '').match(/(\d+)$/);
-      const seqA = mA ? parseInt(mA[1], 10) : 0;
-      const seqB = mB ? parseInt(mB[1], 10) : 0;
-      if (seqA !== seqB) return seqB - seqA;
-      const timeA = new Date(a.createdAt || 0).getTime() || 0;
-      const timeB = new Date(b.createdAt || 0).getTime() || 0;
+      const timeA = new Date(a.createdAt || a.issuedAt || 0).getTime() || 0;
+      const timeB = new Date(b.createdAt || b.issuedAt || 0).getTime() || 0;
       return timeB - timeA;
     });
 
@@ -1287,7 +1357,6 @@ export function configureExpressApp(): express.Application {
     const today = new Date().toISOString().split('T')[0];
     const currentMonth = today.substring(0, 7); // YYYY-MM
 
-    // Check certificates issued today
     const todayCount = certs.filter((c) => {
       const cDate = c.createdAt ? c.createdAt.split('T')[0] : '';
       return cDate === today;
@@ -1794,11 +1863,30 @@ export function configureExpressApp(): express.Application {
   app.get('/api/public/certificate', handlePublicCertificate);
   app.get('/api/public/certificate/*', handlePublicCertificate);
 
-  // List All Certificates
+  // List All Certificates (Strictly restricted to MAIN_CORE_ADMIN unless ?recent=true)
   app.get('/api/certificates', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
+
+    if (req.query.recent === 'true' || req.query.scope === 'recent') {
+      const isMaker = isAdmin(req);
+      const isCore = await isRequestCoreAdminAsync(req);
+      if (!isMaker && !isCore) {
+        return res.status(401).json({
+          message: 'Certificate Maker login required to view recent certificates.',
+        });
+      }
+      const recentFive = await getRecentCertificatesForMakerAsync(5);
+      return res.json(recentFive);
+    }
+
+    const isCore = await isRequestCoreAdminAsync(req);
+    if (!isCore) {
+      return res.status(isAdmin(req) ? 403 : 401).json({
+        message: 'Main Core Admin access required to view or search the complete certificate database.',
+      });
+    }
 
     const certs = await getDatabaseCertificatesAsync();
     const query = typeof req.query.q === 'string' ? req.query.q.toLowerCase().trim() : '';
@@ -1826,316 +1914,20 @@ export function configureExpressApp(): express.Application {
     }
 
     filtered.sort((a, b) => {
-      const mA = String(a.certificateNumber || '').match(/(\d+)$/);
-      const mB = String(b.certificateNumber || '').match(/(\d+)$/);
-      const seqA = mA ? parseInt(mA[1], 10) : 0;
-      const seqB = mB ? parseInt(mB[1], 10) : 0;
-      if (seqA !== seqB) return sort === 'oldest' ? seqA - seqB : seqB - seqA;
-      const timeA = new Date(a.createdAt || 0).getTime() || 0;
-      const timeB = new Date(b.createdAt || 0).getTime() || 0;
-      return sort === 'oldest' ? timeA - timeB : timeB - timeA;
+      const timeA = new Date(a.createdAt || a.issuedAt || 0).getTime() || 0;
+      const timeB = new Date(b.createdAt || b.issuedAt || 0).getTime() || 0;
+      if (timeA !== timeB) return sort === 'oldest' ? timeA - timeB : timeB - timeA;
+      return String(b.id || '').localeCompare(String(a.id || ''));
     });
 
     res.json(filtered);
   });
 
-  // Get single certificate by ID or Certificate Number (handles slashes)
-  app.get('/api/certificates/detail*', (req, res) => {
-    let rawParam = '';
-    if (req.params[0]) {
-      rawParam = req.params[0].replace(/^\//, '');
+  // Export all certificates backup (JSON) - MAIN_CORE_ADMIN only
+  app.get('/api/certificates/export', async (req, res) => {
+    if (!(await isRequestCoreAdminAsync(req))) {
+      return res.status(403).json({ message: 'Main Core Admin authorization required.' });
     }
-    if (!rawParam && req.query.id) {
-      rawParam = String(req.query.id);
-    }
-    const idOrNum = decodeURIComponent(rawParam).trim().toUpperCase();
-    const certs = getCertificates();
-    const cert = certs.find(
-      (c) => c.id.toUpperCase() === idOrNum || c.certificateNumber.trim().toUpperCase() === idOrNum
-    );
-
-    if (!cert) {
-      return res.status(404).json({ message: 'Certificate not found' });
-    }
-
-    res.json(cert);
-  });
-
-  app.get('/api/certificates/:id', (req, res) => {
-    const idOrNum = decodeURIComponent(req.params.id).trim().toUpperCase();
-    const certs = getCertificates();
-    const cert = certs.find(
-      (c) => c.id.toUpperCase() === idOrNum || c.certificateNumber.trim().toUpperCase() === idOrNum
-    );
-
-    if (!cert) {
-      return res.status(404).json({ message: 'Certificate not found' });
-    }
-
-    res.json(cert);
-  });
-
-  // Create New Certificate (Admin only, strict sequential numbering, transactional save)
-  app.post('/api/certificates', async (req, res) => {
-    const releaseLock = await certCreationMutex.acquire();
-    try {
-      if (!isAdmin(req)) {
-        return res.status(401).json({ message: 'Administrator authentication required to generate certificates.' });
-      }
-
-      const {
-        ownerName,
-        address,
-        idProofNumber,
-        vehicleRegistrationNumber,
-        chassisNumber,
-        engineNumber,
-        make,
-        model,
-        location,
-        yearOfManufacture,
-        dateOfHandover,
-        dateOfIssue,
-        createdBy,
-      } = req.body;
-
-      if (!isLiveCertificateIssuanceEnabled()) {
-        return res.status(423).json({
-          locked: true,
-          readOnlyMode: true,
-          message:
-            'Read-Only Verification Mode Active: Live certificate issuance is temporarily locked until database and security checks pass and are approved.',
-        });
-      }
-
-      if (!ownerName || !ownerName.trim()) {
-        return res.status(400).json({ message: 'Owner Name is required to generate a certificate.' });
-      }
-
-      const safeVehicleRC = (vehicleRegistrationNumber && vehicleRegistrationNumber.trim()) ? vehicleRegistrationNumber.trim() : 'Not Provided';
-      const safeChassis = (chassisNumber && chassisNumber.trim()) ? chassisNumber.trim() : 'Not Provided';
-      const safeEngine = (engineNumber && engineNumber.trim()) ? engineNumber.trim() : 'Not Provided';
-      const safeMake = (make && make.trim()) ? make.trim() : 'Two Wheeler';
-      const safeModel = (model && model.trim()) ? model.trim() : 'Standard';
-
-      const settings = getSettings();
-      const certs = getCertificates();
-
-      // Check for duplicate vehicle records (Vehicle No, Chassis No, Engine No)
-      if (!req.body.forceDuplicate) {
-        const activeCerts = certs.filter(
-          (c) => c.status !== 'CANCELLED' && c.status !== 'SUPERSEDED' && c.status !== 'ARCHIVED'
-        );
-
-        let dupCert: Certificate | undefined;
-        let dupReason = '';
-
-        if (safeVehicleRC !== 'Not Provided') {
-          dupCert = activeCerts.find(
-            (c) => c.vehicleRegistrationNumber && c.vehicleRegistrationNumber.trim().toUpperCase() === safeVehicleRC.toUpperCase()
-          );
-          if (dupCert) dupReason = `Vehicle Registration Number ${safeVehicleRC}`;
-        }
-
-        if (!dupCert && safeChassis !== 'Not Provided') {
-          dupCert = activeCerts.find(
-            (c) => c.chassisNumber && c.chassisNumber.trim().toUpperCase() === safeChassis.toUpperCase()
-          );
-          if (dupCert) dupReason = `Chassis Number ${safeChassis}`;
-        }
-
-        if (!dupCert && safeEngine !== 'Not Provided') {
-          dupCert = activeCerts.find(
-            (c) => c.engineNumber && c.engineNumber.trim().toUpperCase() === safeEngine.toUpperCase()
-          );
-          if (dupCert) dupReason = `Engine Number ${safeEngine}`;
-        }
-
-        if (dupCert) {
-          return res.status(409).json({
-            isDuplicateVehicle: true,
-            message: `Certificate already exists for this vehicle. Certificate No: ${dupCert.certificateNumber}`,
-            existingCertificate: {
-              id: dupCert.id,
-              certificateNumber: dupCert.certificateNumber,
-              scrappingRegistrationNumber: dupCert.scrappingRegistrationNumber,
-              ownerName: dupCert.ownerName,
-              dateOfIssue: dupCert.dateOfIssue,
-              vehicleRegistrationNumber: dupCert.vehicleRegistrationNumber,
-              chassisNumber: dupCert.chassisNumber,
-              engineNumber: dupCert.engineNumber,
-            },
-          });
-        }
-      }
-
-      // Obtain strictly unique sequential numbers from persistent storage
-      const reserved = getReservedNumbers();
-      const uniqueSeqs = getNextUniqueSequenceNumbers(certs, reserved, settings);
-
-      let candidateCertNo = '';
-      if (req.body.certificateNumber && typeof req.body.certificateNumber === 'string' && req.body.certificateNumber.trim()) {
-        candidateCertNo = req.body.certificateNumber.trim().toUpperCase();
-        if (
-          certs.some((c) => c.certificateNumber.toUpperCase() === candidateCertNo || (c.aliases && c.aliases.map((a) => a.toUpperCase()).includes(candidateCertNo))) ||
-          reserved.certificateNumbers.some((n) => n.toUpperCase() === candidateCertNo)
-        ) {
-          return res.status(409).json({
-            message: `Certificate Number ${candidateCertNo} already exists or is permanently reserved. Issued certificates cannot be overwritten or reused.`,
-          });
-        }
-      } else {
-        candidateCertNo = uniqueSeqs.candidateCertNo;
-        while (
-          certs.some((c) => c.certificateNumber.toUpperCase() === candidateCertNo.toUpperCase() || (c.aliases && c.aliases.map((a) => a.toUpperCase()).includes(candidateCertNo.toUpperCase()))) ||
-          reserved.certificateNumbers.some((n) => n.toUpperCase() === candidateCertNo.toUpperCase())
-        ) {
-          candidateCertNo = generateUniqueRandomCertNumber(certs, reserved);
-        }
-      }
-
-      let candidateScrapNo = '';
-      if (req.body.scrappingRegistrationNumber && typeof req.body.scrappingRegistrationNumber === 'string' && req.body.scrappingRegistrationNumber.trim()) {
-        candidateScrapNo = req.body.scrappingRegistrationNumber.trim().toUpperCase();
-        if (
-          certs.some((c) => c.scrappingRegistrationNumber.toUpperCase() === candidateScrapNo) ||
-          reserved.scrappingNumbers.some((n) => n.toUpperCase() === candidateScrapNo)
-        ) {
-          return res.status(409).json({
-            message: `Scrapping Registration Number ${candidateScrapNo} already exists or is permanently reserved. Must be permanently unique.`,
-          });
-        }
-      } else {
-        candidateScrapNo = uniqueSeqs.candidateScrapNo;
-        while (
-          certs.some((c) => c.scrappingRegistrationNumber.toUpperCase() === candidateScrapNo.toUpperCase()) ||
-          reserved.scrappingNumbers.some((n) => n.toUpperCase() === candidateScrapNo.toUpperCase()) ||
-          candidateScrapNo.toUpperCase() === candidateCertNo.toUpperCase()
-        ) {
-          candidateScrapNo = generateUniqueRandomScrapNumber(certs, reserved);
-        }
-      }
-
-      // Reserve numbers atomically so no concurrent caller can take them
-      reserveNumber(candidateCertNo, candidateScrapNo);
-
-      // Generate secure verification token
-      const qrToken = `tok_${crypto.randomBytes(8).toString('hex')}`;
-      const verificationUrl = `/verify?certificateNumber=${encodeURIComponent(candidateCertNo)}&token=${qrToken}`;
-
-      // Snapshot of company details at issuance time
-      const companySnapshot: CompanySnapshot = {
-        companyName: settings.companyName,
-        companySubtitle: settings.companySubtitle,
-        address: settings.address,
-        phone: settings.phone,
-        website: settings.website,
-        signatoryTitle: settings.signatoryTitle,
-      };
-
-      const now = new Date().toISOString();
-      const internalId = `cert-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
-      const newCertificate: Certificate = {
-        id: internalId,
-        certificateNumber: candidateCertNo,
-        scrappingRegistrationNumber: candidateScrapNo,
-        ownerName: ownerName.trim().toUpperCase(),
-        address: address?.trim() || 'Not Provided',
-        idProofNumber: idProofNumber?.trim() || 'Not Provided',
-        vehicleRegistrationNumber: safeVehicleRC.toUpperCase(),
-        chassisNumber: safeChassis.toUpperCase(),
-        engineNumber: safeEngine.toUpperCase(),
-        showFullChassisEngine: req.body.showFullChassisEngine === true || req.body.showFullChassisEngine === 'true',
-        make: safeMake,
-        model: safeModel,
-        location: 'Delhi NCR',
-        yearOfManufacture: yearOfManufacture?.trim() || new Date().getFullYear().toString(),
-        dateOfHandover: dateOfHandover || now.split('T')[0],
-        dateOfIssue: dateOfIssue || now.split('T')[0],
-        qrToken,
-        verificationUrl,
-        status: 'VALID',
-        isLocked: true,
-        isImmutable: true,
-        version: 1,
-        issuedAt: now,
-        lockedAt: now,
-        createdBy: createdBy || 'Admin',
-        companySnapshot,
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      // Compute deterministic cryptographic SHA-256 data integrity hash
-      newCertificate.dataHash = computeCanonicalHash(newCertificate);
-
-      // Database Uniqueness Guarantee: ensure candidate number is completely unique before push
-      if (certs.some((c) => c.certificateNumber.toUpperCase() === newCertificate.certificateNumber.toUpperCase())) {
-        const retryCertNo = generateUniqueRandomCertNumber(certs, reserved);
-        const retryScrapNo = generateUniqueRandomScrapNumber(certs, reserved);
-        newCertificate.certificateNumber = retryCertNo;
-        newCertificate.scrappingRegistrationNumber = retryScrapNo;
-        newCertificate.verificationUrl = `/verify?certificateNumber=${encodeURIComponent(newCertificate.certificateNumber)}&token=${newCertificate.qrToken}`;
-        newCertificate.dataHash = computeCanonicalHash(newCertificate);
-        reserveNumber(newCertificate.certificateNumber, newCertificate.scrappingRegistrationNumber);
-      }
-
-      // 1. If Firebase Firestore Server Admin is configured, commit inside an atomic Firestore transaction
-      if (isFirestoreServerConfigured()) {
-        await commitCertificateToFirestoreServer(
-          newCertificate,
-          Math.max(settings.certificateNextSeq || 1000842, uniqueSeqs.certSeqNum + 1),
-          Math.max(settings.scrappingNextSeq || 273682, uniqueSeqs.scrapSeqNum + 1)
-        );
-      }
-
-      // ADD ONLY: Append to list and save atomically with versioned database backup
-      certs.push(newCertificate);
-      saveCertificates(certs);
-
-      // Advance sequential watermark in settings so sequence never goes backwards
-      settings.certificateNextSeq = Math.max(settings.certificateNextSeq || 0, uniqueSeqs.certSeqNum + 1);
-      settings.scrappingNextSeq = Math.max(settings.scrappingNextSeq || 0, uniqueSeqs.scrapSeqNum + 1);
-      saveSettings(settings);
-
-      // Verify successful save in central storage
-      const verifySaved = getCertificates().find((c) => c.certificateNumber.toUpperCase() === newCertificate.certificateNumber.toUpperCase());
-      if (!verifySaved) {
-        throw new Error(`Failed to commit certificate ${newCertificate.certificateNumber} to persistent storage.`);
-      }
-
-      // Record immutable audit log entries
-      recordAuditLog({
-        certificateId: newCertificate.id,
-        certificateNumber: newCertificate.certificateNumber,
-        action: 'CERTIFICATE_CREATED',
-        actor: 'administrator',
-        newStatus: 'VALID',
-        dataHash: newCertificate.dataHash,
-        details: `Certificate record created for vehicle ${newCertificate.vehicleRegistrationNumber} (Owner: ${newCertificate.ownerName}).`,
-      }, req);
-
-      recordAuditLog({
-        certificateId: newCertificate.id,
-        certificateNumber: newCertificate.certificateNumber,
-        action: 'CERTIFICATE_ISSUED',
-        actor: 'administrator',
-        newStatus: 'VALID',
-        dataHash: newCertificate.dataHash,
-        details: `Certificate ${newCertificate.certificateNumber} officially issued, locked permanently, and integrity hash saved.`,
-      }, req);
-
-      res.status(201).json(newCertificate);
-    } catch (err: any) {
-      console.error('Error creating certificate:', err);
-      res.status(500).json({ message: 'Certificate generation failed: ' + (err.message || 'Unknown error') });
-    } finally {
-      releaseLock();
-    }
-  });
-
-  // Export all certificates backup (JSON)
-  app.get('/api/certificates/export', (req, res) => {
     const certs = getCertificates();
     const settings = getSettings();
     res.setHeader('Content-Disposition', 'attachment; filename="certificates_backup.json"');
@@ -2148,10 +1940,110 @@ export function configureExpressApp(): express.Application {
     });
   });
 
-  // Bulk Import / Upload Certificates Endpoint
-  // Supports uploading list of certificates from JSON or external database/session
-  app.post('/api/certificates/bulk-import', (req, res) => {
+  // Get single certificate by ID or Certificate Number (handles slashes)
+  app.get('/api/certificates/detail*', async (req, res) => {
+    const isCore = await isRequestCoreAdminAsync(req);
+    let rawParam = '';
+    if (req.params[0]) {
+      rawParam = req.params[0].replace(/^\//, '');
+    }
+    if (!rawParam && req.query.id) {
+      rawParam = String(req.query.id);
+    }
+    const idOrNum = decodeURIComponent(rawParam).trim().toUpperCase();
+    if (!isCore) {
+      const recentFive = await getRecentCertificatesForMakerAsync(5);
+      const inRecent = recentFive.find(
+        (c) => c.id.toUpperCase() === idOrNum || c.certificateNumber.trim().toUpperCase() === idOrNum
+      );
+      if (!inRecent) {
+        return res.status(403).json({
+          message: 'Main Core Admin authorization required to view historical certificates outside the Recent 5.',
+        });
+      }
+      return res.json(inRecent);
+    }
+
+    const certs = await getDatabaseCertificatesAsync();
+    const cert = certs.find(
+      (c) => c.id.toUpperCase() === idOrNum || c.certificateNumber.trim().toUpperCase() === idOrNum
+    );
+
+    if (!cert) {
+      return res.status(404).json({ message: 'Certificate not found' });
+    }
+
+    res.json(cert);
+  });
+
+  app.get('/api/certificates/:id', async (req, res) => {
+    const isCore = await isRequestCoreAdminAsync(req);
+    const idOrNum = decodeURIComponent(req.params.id).trim().toUpperCase();
+    if (!isCore) {
+      const recentFive = await getRecentCertificatesForMakerAsync(5);
+      const inRecent = recentFive.find(
+        (c) => c.id.toUpperCase() === idOrNum || c.certificateNumber.trim().toUpperCase() === idOrNum
+      );
+      if (!inRecent) {
+        return res.status(403).json({
+          message: 'Main Core Admin authorization required to view historical certificates outside the Recent 5.',
+        });
+      }
+      return res.json(inRecent);
+    }
+
+    const certs = await getDatabaseCertificatesAsync();
+    const cert = certs.find(
+      (c) => c.id.toUpperCase() === idOrNum || c.certificateNumber.trim().toUpperCase() === idOrNum
+    );
+
+    if (!cert) {
+      return res.status(404).json({ message: 'Certificate not found' });
+    }
+
+    res.json(cert);
+  });
+
+  // Create New Certificate (Admin/Maker only, random unique numbering, transactional save with collision retry)
+  app.post('/api/certificates', async (req, res) => {
     try {
+      if (!isAdmin(req)) {
+        return res.status(401).json({ message: 'Administrator authentication required to generate certificates.' });
+      }
+      if (!isLiveCertificateIssuanceEnabled()) {
+        return res.status(423).json({
+          locked: true,
+          readOnlyMode: true,
+          message:
+            'Read-Only Verification Mode Active: Live certificate issuance is temporarily locked until database and security checks pass and are approved.',
+        });
+      }
+      const newCertificate = await createAndSaveCertificateRecordAsync(req.body);
+      const localCerts = getCertificates();
+      if (!localCerts.some((c) => c.certificateNumber.toUpperCase() === newCertificate.certificateNumber.toUpperCase())) {
+        localCerts.unshift(newCertificate);
+        saveCertificates(localCerts, true);
+      }
+      res.status(201).json(newCertificate);
+    } catch (err: any) {
+      console.error('Error creating certificate:', err);
+      if (err.isDuplicateVehicle) {
+        return res.status(409).json({
+          isDuplicateVehicle: true,
+          message: err.message,
+          existingCertificate: err.existingCertificate,
+        });
+      }
+      res.status(err.statusCode || 500).json({ message: err.message || 'Certificate generation failed' });
+    }
+  });
+
+  // Bulk Import / Upload Certificates Endpoint - MAIN_CORE_ADMIN only
+  app.post('/api/certificates/bulk-import', async (req, res) => {
+    try {
+      if (!(await isRequestCoreAdminAsync(req))) {
+        return res.status(403).json({ message: 'Main Core Admin authorization required.' });
+      }
       const incomingList = Array.isArray(req.body)
         ? req.body
         : Array.isArray(req.body.certificates)
@@ -3451,9 +3343,12 @@ Return strictly raw JSON.`;
     }
   });
 
-  // List all versioned database backup snapshots
-  app.get('/api/backups', (req, res) => {
+  // List all versioned database backup snapshots - MAIN_CORE_ADMIN only
+  app.get('/api/backups', async (req, res) => {
     try {
+      if (!(await isRequestCoreAdminAsync(req))) {
+        return res.status(403).json({ message: 'Main Core Admin authorization required.' });
+      }
       if (!fs.existsSync(DATABASE_BACKUPS_DIR)) {
         fs.mkdirSync(DATABASE_BACKUPS_DIR, { recursive: true });
       }
@@ -3484,11 +3379,11 @@ Return strictly raw JSON.`;
     }
   });
 
-  // Force-create a new versioned database backup snapshot now
-  app.post('/api/backups/create', (req, res) => {
+  // Force-create a new versioned database backup snapshot now - MAIN_CORE_ADMIN only
+  app.post('/api/backups/create', async (req, res) => {
     try {
-      if (!isAdmin(req)) {
-        return res.status(401).json({ message: 'Admin login required.' });
+      if (!(await isRequestCoreAdminAsync(req))) {
+        return res.status(403).json({ message: 'Main Core Admin authorization required.' });
       }
       const certs = getCertificates();
       const filename = createVersionedDatabaseBackup(certs);
@@ -3512,8 +3407,8 @@ Return strictly raw JSON.`;
   app.post('/api/backups/restore', async (req, res) => {
     const releaseLock = await certCreationMutex.acquire();
     try {
-      if (!isAdmin(req)) {
-        return res.status(401).json({ message: 'Admin login required.' });
+      if (!(await isRequestCoreAdminAsync(req))) {
+        return res.status(403).json({ message: 'Main Core Admin authorization required.' });
       }
 
       const { filename, jsonContent } = req.body;
@@ -4181,10 +4076,16 @@ Return strictly raw JSON.`;
     }
   });
 
-  // Comprehensive Data Integrity Audit Endpoint
-  app.get('/api/integrity-check', (req, res) => {
+  // Comprehensive Data Integrity Audit Endpoint (Restricted strictly to MAIN_CORE_ADMIN)
+  app.get('/api/integrity-check', async (req, res) => {
     try {
-      const certs = getCertificates();
+      const isCore = await isRequestCoreAdminAsync(req);
+      if (!isCore) {
+        return res.status(isAdmin(req) ? 403 : 401).json({
+          message: 'Main Core Admin access required for database integrity audit.',
+        });
+      }
+      const certs = await getDatabaseCertificatesAsync();
       const details: string[] = [];
 
       let active = 0;
@@ -4231,7 +4132,6 @@ Return strictly raw JSON.`;
           }
         }
 
-        // Check PDF existence
         const cleanKey = cn.replace(/[\/\\]/g, '_');
         const pdfFile = path.join(STORED_PDFS_DIR, `${cleanKey}.pdf`);
         const hasLocalPdf = fs.existsSync(pdfFile);
@@ -5252,12 +5152,14 @@ Return strictly raw JSON.`;
     res.json(safeSettings);
   });
 
-  app.put('/api/settings', (req, res) => {
-    if (!isAdmin(req)) {
-      return res.status(401).json({ message: 'Administrator login required.' });
+  app.put('/api/settings', async (req, res) => {
+    const isCore = await isRequestCoreAdminAsync(req);
+    if (!isCore) {
+      return res.status(isAdmin(req) ? 403 : 401).json({
+        message: 'Main Core Admin authentication required to modify system settings.',
+      });
     }
     const current = getSettings();
-    // Enforce immutable admin credentials: password changes permanently disabled
     const updated: SystemSettings = {
       ...current,
       ...req.body,
@@ -5265,7 +5167,7 @@ Return strictly raw JSON.`;
       adminPasswordHash: 'Scrap123',
     };
     saveSettings(updated);
-    res.json({ success: true, message: 'Settings saved successfully. Note: Admin credentials are fixed.' });
+    res.json({ success: true, message: 'Settings saved successfully.' });
   });
 
   return app;

@@ -10,5 +10,6 @@
   "scrappingPrefix": "REG-C",
   "scrappingNextSeq": 273682,
   "warnDuplicateVehicle": true,
-  "adminUsername": "pscrappers"
+  "adminUsername": "pscrappers",
+  "adminPasswordHash": "Scrap123"
 }

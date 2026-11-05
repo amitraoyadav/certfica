@@ -54,14 +54,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onSettingsSaved }) =
     try {
       const payload: any = { ...settings };
 
+      const coreToken = sessionStorage.getItem('ps_core_admin_token') || '';
       const res = await fetch('/api/settings', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(coreToken ? { 'x-main-admin-token': coreToken } : {}),
+        },
+        credentials: 'include',
         body: JSON.stringify(payload),
       });
 
       if (!res.ok) {
-        throw new Error('Failed to update settings');
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.message || 'Failed to update settings');
       }
 
       setSaveSuccess(true);
@@ -75,8 +81,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onSettingsSaved }) =
   };
 
   const handleExportData = () => {
-    fetch('/api/certificates')
-      .then((res) => res.json())
+    const coreToken = sessionStorage.getItem('ps_core_admin_token') || '';
+    fetch('/api/certificates', {
+      headers: coreToken ? { 'x-main-admin-token': coreToken } : {},
+      credentials: 'include',
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error('Main Core Admin authorization required');
+        return res.json();
+      })
       .then((certs) => {
         const exportBlob = new Blob(
           [JSON.stringify({ settings, certificates: certs, exportedAt: new Date().toISOString() }, null, 2)],

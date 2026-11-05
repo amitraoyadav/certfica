@@ -2378,5 +2378,148 @@
     "details": "Verification attempt failed. No matching canonical certificate record found for query: PS/26/R9999999",
     "ip": "127.0.0.1",
     "userAgent": "node"
+  },
+  {
+    "id": "audit-1793907509375-4065628c",
+    "timestamp": "2026-11-05T19:38:29.375Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin privileges unlocked successfully.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793907509563-f0ebf016",
+    "timestamp": "2026-11-05T19:38:29.563Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin password changed and session version incremented to v2.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793907509615-69245da2",
+    "timestamp": "2026-11-05T19:38:29.615Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_FAILED",
+    "actor": "user",
+    "details": "Failed Main Core Admin elevation attempt with incorrect password.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793907618320-86afe35c",
+    "timestamp": "2026-11-05T19:40:18.320Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_FAILED",
+    "actor": "user",
+    "details": "Failed Main Core Admin elevation attempt with incorrect password.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793907618365-693d260a",
+    "timestamp": "2026-11-05T19:40:18.365Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin privileges unlocked successfully.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793907661022-7447828a",
+    "timestamp": "2026-11-05T19:41:01.022Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_FAILED",
+    "actor": "user",
+    "details": "Failed Main Core Admin elevation attempt with incorrect password.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793907661070-5dd18bd5",
+    "timestamp": "2026-11-05T19:41:01.070Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_FAILED",
+    "actor": "user",
+    "details": "Failed Main Core Admin elevation attempt with incorrect password.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793907661109-cc289e0c",
+    "timestamp": "2026-11-05T19:41:01.109Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin privileges unlocked successfully.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793907941308-e36845ae",
+    "timestamp": "2026-11-05T19:45:41.308Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin privileges unlocked successfully.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793907941511-fde02c60",
+    "timestamp": "2026-11-05T19:45:41.511Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin password changed and session version incremented to v4.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793907941547-dde0aed4",
+    "timestamp": "2026-11-05T19:45:41.547Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_FAILED",
+    "actor": "user",
+    "details": "Failed Main Core Admin elevation attempt with incorrect password.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793907941589-0d35b48e",
+    "timestamp": "2026-11-05T19:45:41.589Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin privileges unlocked successfully.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793907941712-d750022f",
+    "timestamp": "2026-11-05T19:45:41.712Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin password changed and session version incremented to v5.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
   }
 ]

@@ -12,7 +12,15 @@ export const SESSION_SECRET = cleanEnvValue(
   'ps_hmac_server_secret_key_2026_parivahan'
 );
 
-export const MAIN_ADMIN_PASSWORD = cleanEnvValue(process.env.MAIN_ADMIN_PASSWORD, 'Scrapbyparivahan');
+export const CORE_ADMIN_INITIAL_PASSWORD = cleanEnvValue(
+  process.env.CORE_ADMIN_INITIAL_PASSWORD,
+  'wearescrappers'
+);
+
+export const MAIN_ADMIN_PASSWORD = cleanEnvValue(
+  process.env.MAIN_ADMIN_PASSWORD,
+  CORE_ADMIN_INITIAL_PASSWORD
+);
 export const ADMIN_USERNAME = cleanEnvValue(process.env.ADMIN_USERNAME, 'pscrappers');
 export const ADMIN_PASSWORD = cleanEnvValue(process.env.ADMIN_PASSWORD, 'Scrap123');
 export const ADMIN_DELETE_PASSWORD = cleanEnvValue(process.env.ADMIN_DELETE_PASSWORD, 'Admin00');
@@ -22,8 +30,10 @@ export const ADMIN_PROTECTED_PASSWORD = cleanEnvValue(
 );
 
 export const ADMIN_SESSION_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
-export const MAIN_ADMIN_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+export const MAIN_ADMIN_TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12 hours
 export const LEGACY_ADMIN_SESSION_TOKEN = 'ps_admin_session_token_secure_2026';
+
+export type UserRole = 'CERTIFICATE_MAKER' | 'MAIN_CORE_ADMIN';
 
 /**
  * Constant-time string comparison to prevent timing attacks
@@ -32,7 +42,6 @@ export function safeCompare(a: string, b: string): boolean {
   const bufA = Buffer.from(String(a));
   const bufB = Buffer.from(String(b));
   if (bufA.length !== bufB.length) {
-    // Compare against itself to keep constant time before returning false
     crypto.timingSafeEqual(bufA, bufA);
     return false;
   }
@@ -40,10 +49,44 @@ export function safeCompare(a: string, b: string): boolean {
 }
 
 /**
- * Validates administrator login username and password on the server.
+ * Strong salted scrypt password hashing for Main Core Admin credentials stored in Firestore
+ */
+export function hashCoreAdminPassword(password: string): string {
+  const clean = String(password).trim();
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derivedKey = crypto.scryptSync(clean, salt, 64).toString('hex');
+  return `scrypt$${salt}$${derivedKey}`;
+}
+
+/**
+ * Verifies a plaintext password against a stored salted scrypt hash
+ */
+export function verifyCoreAdminHash(password: string, storedHash: string): boolean {
+  if (!password || !storedHash || typeof password !== 'string' || typeof storedHash !== 'string') {
+    return false;
+  }
+  const clean = password.trim();
+  if (!clean) return false;
+
+  if (storedHash.startsWith('scrypt$')) {
+    const parts = storedHash.split('$');
+    if (parts.length !== 3) return false;
+    const [, salt, expectedHex] = parts;
+    if (!salt || !expectedHex) return false;
+    try {
+      const derivedHex = crypto.scryptSync(clean, salt, 64).toString('hex');
+      return safeCompare(derivedHex, expectedHex);
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+/**
+ * Validates normal Certificate Maker login username and password on the server.
  * Accepts ADMIN_USERNAME (pscrappers) and ADMIN_PASSWORD (Scrap123) from server-side
- * environment variables, supports plaintext and SHA-256 password hashes, and ensures
- * database/Firebase settings never override or block primary admin credentials.
+ * environment variables. Normal login grants ONLY CERTIFICATE_MAKER permissions.
  */
 export function verifyAdminCredentials(
   username?: string,
@@ -77,7 +120,6 @@ export function verifyAdminCredentials(
   const allowedPasswords = [
     ADMIN_PASSWORD,
     'Scrap123',
-    MAIN_ADMIN_PASSWORD,
     ADMIN_PROTECTED_PASSWORD,
     (customSettings?.adminPasswordHash || '').trim(),
   ].filter((p) => Boolean(p && !p.startsWith('REPLACE_WITH_')));
@@ -95,7 +137,7 @@ export function verifyAdminCredentials(
 }
 
 /**
- * Creates a cryptographically signed HMAC session token for an authenticated administrator
+ * Creates a cryptographically signed HMAC session token for a Certificate Maker
  */
 export function createAdminSessionToken(username = 'pscrappers'): string {
   const timestamp = Date.now();
@@ -105,7 +147,7 @@ export function createAdminSessionToken(username = 'pscrappers'): string {
 }
 
 /**
- * Validates an administrator session token (HMAC-signed or active session token)
+ * Validates a Certificate Maker session token
  */
 export function isAdminTokenValid(token?: string): boolean {
   if (!token || typeof token !== 'string') return false;
@@ -139,6 +181,43 @@ export function isAdminTokenValid(token?: string): boolean {
 }
 
 /**
+ * Creates a versioned HMAC session token for Main Core Admin (MAIN_CORE_ADMIN role).
+ * Whenever the Core Admin password is changed, sessionVersion increments in Firestore,
+ * immediately invalidating all previously issued Core Admin tokens.
+ */
+export function createCoreAdminToken(sessionVersion = 1): string {
+  const timestamp = Date.now();
+  const ver = Math.max(1, Number(sessionVersion) || 1);
+  const payload = `core-admin:v${ver}:${timestamp}`;
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
+  return `ca.${ver}.${timestamp}.${sig}`;
+}
+
+/**
+ * Verifies a Main Core Admin token against the current expected sessionVersion
+ */
+export function verifyCoreAdminToken(token: string | undefined, expectedSessionVersion = 1): boolean {
+  if (!token || typeof token !== 'string') return false;
+  const clean = token.trim();
+  if (!clean.startsWith('ca.')) return false;
+
+  const parts = clean.split('.');
+  if (parts.length !== 4) return false;
+
+  const ver = parseInt(parts[1], 10);
+  const timestamp = parseInt(parts[2], 10);
+  const providedSig = parts[3];
+
+  if (isNaN(ver) || isNaN(timestamp)) return false;
+  if (ver !== expectedSessionVersion) return false;
+  if (Date.now() - timestamp > MAIN_ADMIN_TIMEOUT_MS) return false;
+
+  const payload = `core-admin:v${ver}:${timestamp}`;
+  const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
+  return safeCompare(providedSig, expectedSig);
+}
+
+/**
  * Parses cookies from a raw Cookie header string
  */
 export function parseCookies(cookieHeader?: string): Record<string, string> {
@@ -160,20 +239,43 @@ export function parseCookies(cookieHeader?: string): Record<string, string> {
 }
 
 /**
- * Extracts and verifies whether an incoming HTTP request is authenticated as an Administrator
+ * Extracts Core Admin candidate tokens from headers, cookies, or query
+ */
+export function extractCoreAdminTokensFromReq(req: any): string[] {
+  if (!req) return [];
+  const headerCore = req.headers?.['x-main-admin-token'] || req.headers?.['x-core-admin-token'];
+  const authHeader = req.headers?.authorization || req.headers?.Authorization;
+  const queryCore = req.query?.mainAdminToken || req.query?.coreAdminToken;
+  const cookies = parseCookies(req.headers?.cookie);
+  const cookieCore = cookies['ps_core_admin_session'] || cookies['ps_main_admin_session'];
+
+  return [
+    typeof headerCore === 'string' ? headerCore.trim() : '',
+    typeof cookieCore === 'string' ? cookieCore.trim() : '',
+    typeof queryCore === 'string' ? queryCore.trim() : '',
+    typeof authHeader === 'string' ? authHeader.replace(/^Bearer\s+/i, '').trim() : '',
+  ].filter((t) => Boolean(t && t.startsWith('ca.')));
+}
+
+/**
+ * Extracts and verifies whether an incoming HTTP request is authenticated as at least a Certificate Maker
  */
 export function isRequestAdmin(req: any): boolean {
   if (!req) return false;
   const authHeader = req.headers?.authorization || req.headers?.Authorization;
   const headerToken = req.headers?.['x-admin-token'];
+  const coreHeaderToken = req.headers?.['x-main-admin-token'] || req.headers?.['x-core-admin-token'];
   const queryToken = req.query?.token || req.query?.adminToken;
   const cookies = parseCookies(req.headers?.cookie);
   const cookieToken = cookies['ps_admin_session'];
+  const coreCookieToken = cookies['ps_core_admin_session'] || cookies['ps_main_admin_session'];
 
   const candidates = [
     typeof authHeader === 'string' ? authHeader.replace(/^Bearer\s+/i, '').trim() : '',
     typeof headerToken === 'string' ? headerToken.trim() : '',
+    typeof coreHeaderToken === 'string' ? coreHeaderToken.trim() : '',
     typeof cookieToken === 'string' ? cookieToken.trim() : '',
+    typeof coreCookieToken === 'string' ? coreCookieToken.trim() : '',
     typeof queryToken === 'string' ? queryToken.trim() : '',
   ].filter(Boolean);
 
@@ -199,55 +301,33 @@ export function verifyMainAdminPassword(provided?: string): boolean {
   if (!provided || typeof provided !== 'string') return false;
   const clean = provided.trim();
   if (!clean) return false;
-  return (
-    safeCompare(clean, MAIN_ADMIN_PASSWORD) ||
-    safeCompare(clean.toLowerCase(), MAIN_ADMIN_PASSWORD.toLowerCase())
-  );
+  return safeCompare(clean, CORE_ADMIN_INITIAL_PASSWORD);
 }
 
 export function verifyProtectedActionPassword(provided?: string): boolean {
   if (!provided || typeof provided !== 'string') return false;
   const clean = provided.trim();
   if (!clean) return false;
-  const allowed = [MAIN_ADMIN_PASSWORD, ADMIN_DELETE_PASSWORD, ADMIN_PROTECTED_PASSWORD];
+  const allowed = [CORE_ADMIN_INITIAL_PASSWORD, MAIN_ADMIN_PASSWORD, ADMIN_DELETE_PASSWORD, ADMIN_PROTECTED_PASSWORD];
   return allowed.some(
     (p) => safeCompare(clean, p) || safeCompare(clean.toLowerCase(), p.toLowerCase())
   );
 }
 
-export function createMainAdminToken(): string {
-  const timestamp = Date.now();
-  const signature = crypto
-    .createHmac('sha256', SESSION_SECRET)
-    .update(`main-admin:${timestamp}`)
-    .digest('hex');
-  return `ma.${timestamp}.${signature}`;
+export function createMainAdminToken(sessionVersion = 1): string {
+  return createCoreAdminToken(sessionVersion);
 }
 
+/**
+ * Structural/HMAC check for Core Admin token (version check is enforced via isRequestCoreAdminAsync in _db.ts)
+ */
 export function isMainAdminTokenValid(token?: string): boolean {
   if (!token || typeof token !== 'string') return false;
   const clean = token.trim();
-  if (!clean) return false;
-
-  if (clean.startsWith('ma.')) {
-    const parts = clean.split('.');
-    if (parts.length === 3) {
-      const timestamp = parseInt(parts[1], 10);
-      const providedSig = parts[2];
-      if (isNaN(timestamp)) return false;
-      if (Date.now() - timestamp > MAIN_ADMIN_TIMEOUT_MS) return false;
-      const expectedSig = crypto
-        .createHmac('sha256', SESSION_SECRET)
-        .update(`main-admin:${timestamp}`)
-        .digest('hex');
-      return safeCompare(providedSig, expectedSig);
-    }
-    return false;
-  }
-
-  if (clean === 'ma_unlocked') {
-    return true;
-  }
-
-  return false;
+  if (!clean.startsWith('ca.')) return false;
+  const parts = clean.split('.');
+  if (parts.length !== 4) return false;
+  const ver = parseInt(parts[1], 10);
+  if (isNaN(ver) || ver < 1) return false;
+  return verifyCoreAdminToken(clean, ver);
 }

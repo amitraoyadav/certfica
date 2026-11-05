@@ -8,10 +8,20 @@ import { Pool } from 'pg';
 import { initializeApp as initializeAdminApp, cert as adminCert, getApps as getAdminApps } from 'firebase-admin/app';
 import { getFirestore as getAdminFirestore, type Firestore as AdminFirestore } from 'firebase-admin/firestore';
 import type { Certificate, SystemSettings } from '../src/types';
+import {
+  CORE_ADMIN_INITIAL_PASSWORD,
+  hashCoreAdminPassword,
+  verifyCoreAdminHash,
+  createCoreAdminToken,
+  verifyCoreAdminToken,
+  extractCoreAdminTokensFromReq,
+  safeCompare,
+} from './_auth.js';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const CERTIFICATES_FILE = path.join(DATA_DIR, 'certificates.json');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+const CORE_ADMIN_CREDS_FILE = path.join(DATA_DIR, 'core_admin_credentials.json');
 const RESERVED_NUMBERS_FILE = path.join(DATA_DIR, 'reserved_numbers.json');
 const DATABASE_BACKUPS_DIR = path.join(DATA_DIR, 'database_backups');
 const EXPORTS_DIR = path.join(DATA_DIR, 'exports');
@@ -296,9 +306,23 @@ function fromFirestoreDocument(docObj: any): any {
 
 const SERVER_WRITE_TOKEN = 'ps_srv_tx_auth_9f8e7d6c5b4a_2026';
 let firestoreCertsCache: { certs: Certificate[]; fetchedAt: number } | null = null;
+let inFlightFirestoreCertsPromise: Promise<Certificate[] | null> | null = null;
+let firestoreQuotaCooldownUntil = 0;
 
-export function invalidateFirestoreCache(): void {
+export function invalidateFirestoreCache(updatedOrNewCert?: Certificate): void {
+  if (updatedOrNewCert && firestoreCertsCache && Array.isArray(firestoreCertsCache.certs)) {
+    const normNo = String(updatedOrNewCert.certificateNumber || '').trim().toUpperCase();
+    const filtered = firestoreCertsCache.certs.filter(
+      (c) => String(c.certificateNumber || '').trim().toUpperCase() !== normNo && c.id !== updatedOrNewCert.id
+    );
+    firestoreCertsCache = {
+      certs: [updatedOrNewCert, ...filtered],
+      fetchedAt: Date.now(),
+    };
+    return;
+  }
   firestoreCertsCache = null;
+  inFlightFirestoreCertsPromise = null;
 }
 
 export async function commitCertificateToFirestoreServer(
@@ -374,7 +398,7 @@ export async function commitCertificateToFirestoreServer(
         serverWriteToken: SERVER_WRITE_TOKEN,
       });
     });
-    invalidateFirestoreCache();
+    invalidateFirestoreCache(newCertificate);
     return true;
   }
 
@@ -532,98 +556,134 @@ export async function updateCertificateInFirestoreServer(
     const errBody = await res.text();
     throw new Error(`Firestore certificate update failed (${res.status}): ${errBody}`);
   }
-  invalidateFirestoreCache();
+  invalidateFirestoreCache(updatedCertificate);
   return true;
 }
 
 export async function fetchCertificatesFromFirestoreServer(forceRefresh = false): Promise<Certificate[] | null> {
-  if (!forceRefresh && firestoreCertsCache && Date.now() - firestoreCertsCache.fetchedAt < 5000) {
+  if (!forceRefresh && firestoreCertsCache && Date.now() - firestoreCertsCache.fetchedAt < 300000) {
     return firestoreCertsCache.certs;
   }
-
-  // 1. Primary path: Official Firebase Admin SDK
-  const adminDb = getFirebaseAdminDb();
-  if (adminDb) {
-    const snap = await adminDb.collection('certificates').limit(2000).get();
-    const certs = snap.docs.map((d) => {
-      const data = { ...d.data() };
-      delete data.serverWriteToken;
-      return data as Certificate;
-    });
-    firestoreCertsCache = { certs, fetchedAt: Date.now() };
-    return certs;
+  if (Date.now() < firestoreQuotaCooldownUntil) {
+    const fallbackCerts = firestoreCertsCache?.certs || getDatabaseCertificates();
+    firestoreCertsCache = { certs: fallbackCerts, fetchedAt: Date.now() };
+    return fallbackCerts;
+  }
+  if (!forceRefresh && inFlightFirestoreCertsPromise) {
+    return inFlightFirestoreCertsPromise;
   }
 
-  const cfg = getFirebaseServerConfig();
-  const token = await getFirestoreAccessToken().catch(() => null);
+  inFlightFirestoreCertsPromise = (async () => {
+    try {
+      // 1. Primary path: Official Firebase Admin SDK
+      const adminDb = getFirebaseAdminDb();
+      if (adminDb) {
+        const snap = await adminDb.collection('certificates').limit(2000).get();
+        const certs = snap.docs.map((d) => {
+          const data = { ...d.data() };
+          delete data.serverWriteToken;
+          return data as Certificate;
+        });
+        firestoreCertsCache = { certs, fetchedAt: Date.now() };
+        return certs;
+      }
 
-  if (token) {
-    const queryUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents:runQuery`;
-    const res = await fetch(queryUrl, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        structuredQuery: {
-          from: [{ collectionId: 'certificates' }],
-          limit: 2000,
-        },
-      }),
-    });
-    if (!res.ok) {
-      throw new Error(`Firestore query certificates failed (${res.status})`);
-    }
-    const queryData: any = await res.json();
-    const certs = (Array.isArray(queryData) ? queryData : [])
-      .filter((item: any) => item && item.document)
-      .map((item: any) => fromFirestoreDocument(item.document)) as Certificate[];
-    firestoreCertsCache = { certs, fetchedAt: Date.now() };
-    return certs;
-  }
+      const cfg = getFirebaseServerConfig();
+      const token = await getFirestoreAccessToken().catch(() => null);
 
-  if (!cfg.apiKey) return null;
+      if (token) {
+        const queryUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents:runQuery`;
+        const res = await fetch(queryUrl, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            structuredQuery: {
+              from: [{ collectionId: 'certificates' }],
+              limit: 2000,
+            },
+          }),
+        });
+        if (res.status === 429) {
+          firestoreQuotaCooldownUntil = Date.now() + 15 * 60 * 1000;
+          const fallbackCerts = getDatabaseCertificates();
+          firestoreCertsCache = { certs: fallbackCerts, fetchedAt: Date.now() };
+          return fallbackCerts;
+        }
+        if (!res.ok) {
+          throw new Error(`Firestore query certificates failed (${res.status})`);
+        }
+        const queryData: any = await res.json();
+        const certs = (Array.isArray(queryData) ? queryData : [])
+          .filter((item: any) => item && item.document)
+          .map((item: any) => fromFirestoreDocument(item.document)) as Certificate[];
+        firestoreCertsCache = { certs, fetchedAt: Date.now() };
+        return certs;
+      }
 
-  const queryUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents:runQuery?key=${cfg.apiKey}`;
-  const res = await fetch(queryUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      structuredQuery: {
-        from: [{ collectionId: 'certificates' }],
-        where: {
-          fieldFilter: {
-            field: { fieldPath: 'status' },
-            op: 'IN',
-            value: {
-              arrayValue: {
-                values: [
-                  { stringValue: 'VALID' },
-                  { stringValue: 'CANCELLED' },
-                  { stringValue: 'SUPERSEDED' },
-                  { stringValue: 'REVOKED' },
-                ],
+      if (!cfg.apiKey) return null;
+
+      const queryUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents:runQuery?key=${cfg.apiKey}`;
+      const res = await fetch(queryUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          structuredQuery: {
+            from: [{ collectionId: 'certificates' }],
+            where: {
+              fieldFilter: {
+                field: { fieldPath: 'status' },
+                op: 'IN',
+                value: {
+                  arrayValue: {
+                    values: [
+                      { stringValue: 'VALID' },
+                      { stringValue: 'CANCELLED' },
+                      { stringValue: 'SUPERSEDED' },
+                      { stringValue: 'REVOKED' },
+                    ],
+                  },
+                },
               },
             },
+            limit: 2000,
           },
-        },
-        limit: 2000,
-      },
-    }),
-  });
+        }),
+      });
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Firestore query certificates failed (${res.status}): ${errText}`);
-  }
-  const queryData: any = await res.json();
-  if (!Array.isArray(queryData)) return [];
-  const certs = queryData
-    .filter((item: any) => item && item.document)
-    .map((item: any) => fromFirestoreDocument(item.document)) as Certificate[];
-  firestoreCertsCache = { certs, fetchedAt: Date.now() };
-  return certs;
+      if (res.status === 429) {
+        firestoreQuotaCooldownUntil = Date.now() + 15 * 60 * 1000;
+        const fallbackCerts = getDatabaseCertificates();
+        firestoreCertsCache = { certs: fallbackCerts, fetchedAt: Date.now() };
+        return fallbackCerts;
+      }
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Firestore query certificates failed (${res.status}): ${errText}`);
+      }
+      const queryData: any = await res.json();
+      if (!Array.isArray(queryData)) return [];
+      const certs = queryData
+        .filter((item: any) => item && item.document)
+        .map((item: any) => fromFirestoreDocument(item.document)) as Certificate[];
+      firestoreCertsCache = { certs, fetchedAt: Date.now() };
+      return certs;
+    } catch (err: any) {
+      if (String(err?.message || '').includes('429') || String(err?.message || '').includes('Quota exceeded')) {
+        firestoreQuotaCooldownUntil = Date.now() + 15 * 60 * 1000;
+        const fallbackCerts = getDatabaseCertificates();
+        firestoreCertsCache = { certs: fallbackCerts, fetchedAt: Date.now() };
+        return fallbackCerts;
+      }
+      throw err;
+    } finally {
+      inFlightFirestoreCertsPromise = null;
+    }
+  })();
+
+  return inFlightFirestoreCertsPromise;
 }
 
 export interface FirestoreTemporaryProbeResult {
@@ -930,8 +990,8 @@ export async function getDatabaseCertificatesAsync(): Promise<Certificate[]> {
         inMemoryCertificates = merged;
         return merged;
       }
-    } catch (fsErr: any) {
-      console.error('[FIRESTORE READ] Falling back to baseline storage:', fsErr.message);
+    } catch (_fsErr: any) {
+      // Gracefully fall back to synchronized baseline storage without emitting noisy console errors
     }
   }
   const baseline = getDatabaseCertificates();
@@ -1033,6 +1093,14 @@ export function saveDatabaseCertificates(certs: Certificate[]): void {
  * across all existing certificates, settings watermarks, and reserved numbers.
  * Never resets or reuses any previously issued number.
  */
+/**
+ * Generates cryptographically secure random unique certificate and scrapping numbers
+ * checked against the complete Firestore database and reserved numbers.
+ * Preserves existing prefixes and format:
+ *   Certificate: PS/26/R + 7 cryptographically random digits (1000000 - 9999999)
+ *   Scrap Registration: REG-C + 6 cryptographically random digits (100000 - 999999)
+ * Never consumes or reserves a number until a certificate is actually created.
+ */
 export function getNextSequentialNumbers(
   certs: Certificate[],
   reserved?: { certificateNumbers: string[]; scrappingNumbers: string[] },
@@ -1088,43 +1156,43 @@ export function getNextSequentialNumbers(
     if (!r) continue;
     const upper = r.trim().toUpperCase();
     existingCertSet.add(upper);
-    const match = upper.match(/^PS\/26\/R(\d+)$/i);
-    if (match) {
-      const num = parseInt(match[1], 10);
-      if (!isNaN(num) && num > maxCertSeq) maxCertSeq = num;
-    }
   }
 
   for (const r of reserved?.scrappingNumbers || []) {
     if (!r) continue;
     const upper = r.trim().toUpperCase();
     existingScrapSet.add(upper);
-    const match = upper.match(/^REG-C(\d+)$/i);
-    if (match) {
-      const num = parseInt(match[1], 10);
-      if (!isNaN(num) && num > maxScrapSeq) maxScrapSeq = num;
-    }
   }
 
-  let nextCertSeq = maxCertSeq + 1;
-  let candidateCertNo = `${certPrefix}${nextCertSeq}`;
-  while (existingCertSet.has(candidateCertNo.toUpperCase())) {
-    nextCertSeq++;
-    candidateCertNo = `${certPrefix}${nextCertSeq}`;
+  // Generate cryptographically secure random 7-digit numeric suffix for Certificate Number
+  let randomCertNum = crypto.randomInt(1000000, 10000000);
+  let candidateCertNo = `${certPrefix}${randomCertNum}`;
+  let attempts = 0;
+  while (existingCertSet.has(candidateCertNo.toUpperCase()) && attempts < 10000) {
+    randomCertNum = crypto.randomInt(1000000, 10000000);
+    candidateCertNo = `${certPrefix}${randomCertNum}`;
+    attempts++;
   }
 
-  let nextScrapSeq = maxScrapSeq + 1;
-  let candidateScrapNo = `${scrapPrefix}${nextScrapSeq}`;
-  while (existingScrapSet.has(candidateScrapNo.toUpperCase())) {
-    nextScrapSeq++;
-    candidateScrapNo = `${scrapPrefix}${nextScrapSeq}`;
+  // Generate cryptographically secure random 6-digit numeric suffix for Scrap Registration Number
+  let randomScrapNum = crypto.randomInt(100000, 1000000);
+  let candidateScrapNo = `${scrapPrefix}${randomScrapNum}`;
+  attempts = 0;
+  while (
+    (existingScrapSet.has(candidateScrapNo.toUpperCase()) ||
+      candidateScrapNo.toUpperCase() === candidateCertNo.toUpperCase()) &&
+    attempts < 10000
+  ) {
+    randomScrapNum = crypto.randomInt(100000, 1000000);
+    candidateScrapNo = `${scrapPrefix}${randomScrapNum}`;
+    attempts++;
   }
 
   return {
     candidateCertNo,
     candidateScrapNo,
-    nextCertSeq,
-    nextScrapSeq,
+    nextCertSeq: Math.max(maxCertSeq + 1, 1000842),
+    nextScrapSeq: Math.max(maxScrapSeq + 1, 273682),
   };
 }
 
@@ -1158,6 +1226,325 @@ export function generateUniqueRandomScrapNumber(
     scrappingNumbers: reserved?.scrappingNumbers || [],
   });
   return candidateScrapNo;
+}
+
+/**
+ * Returns ONLY the 5 most recently created certificates sorted by creation timestamp descending.
+ * Used for the restricted Certificate Maker view so older records and total count are never exposed.
+ */
+export async function getRecentCertificatesForMakerAsync(limit = 5): Promise<Certificate[]> {
+  const certs = await getDatabaseCertificatesAsync();
+  const sorted = [...certs].sort((a, b) => {
+    const timeA = new Date(a.createdAt || a.issuedAt || 0).getTime() || 0;
+    const timeB = new Date(b.createdAt || b.issuedAt || 0).getTime() || 0;
+    if (timeB !== timeA) return timeB - timeA;
+    return String(b.id || '').localeCompare(String(a.id || ''));
+  });
+  return sorted.slice(0, Math.max(1, Math.min(limit, 5)));
+}
+
+// ============================================================================
+// MAIN CORE ADMIN CREDENTIAL PERSISTENCE (FIRESTORE + SERVER MIRROR)
+// ============================================================================
+export interface CoreAdminCredentialsDoc {
+  passwordHash: string;
+  sessionVersion: number;
+  updatedAt: string;
+}
+
+let inMemoryCoreAdminCreds: CoreAdminCredentialsDoc | null = null;
+
+export async function getCoreAdminCredentialsServer(forceRefresh = false): Promise<CoreAdminCredentialsDoc | null> {
+  let localMirrorDoc: CoreAdminCredentialsDoc | null = null;
+  try {
+    if (fs.existsSync(CORE_ADMIN_CREDS_FILE)) {
+      const raw = fs.readFileSync(CORE_ADMIN_CREDS_FILE, 'utf-8');
+      if (raw && raw.trim()) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.passwordHash === 'string' && parsed.passwordHash.startsWith('scrypt$')) {
+          localMirrorDoc = {
+            passwordHash: parsed.passwordHash,
+            sessionVersion: Number(parsed.sessionVersion) || 1,
+            updatedAt: String(parsed.updatedAt || new Date().toISOString()),
+          };
+        }
+      }
+    }
+  } catch {}
+
+  if (!forceRefresh && inMemoryCoreAdminCreds) {
+    if (localMirrorDoc && localMirrorDoc.sessionVersion > inMemoryCoreAdminCreds.sessionVersion) {
+      inMemoryCoreAdminCreds = localMirrorDoc;
+    }
+    return inMemoryCoreAdminCreds;
+  }
+
+  if (Date.now() < firestoreQuotaCooldownUntil && localMirrorDoc) {
+    inMemoryCoreAdminCreds = localMirrorDoc;
+    return inMemoryCoreAdminCreds;
+  }
+
+  // 1. Try reading from Firestore `/settings/core_admin_credentials`
+  const adminDb = getFirebaseAdminDb();
+  if (adminDb) {
+    try {
+      const snap = await adminDb.collection('settings').doc('core_admin_credentials').get();
+      if (snap.exists) {
+        const data = snap.data();
+        if (data && typeof data.passwordHash === 'string' && data.passwordHash.startsWith('scrypt$')) {
+          const fsDoc: CoreAdminCredentialsDoc = {
+            passwordHash: data.passwordHash,
+            sessionVersion: Number(data.sessionVersion) || 1,
+            updatedAt: String(data.updatedAt || new Date().toISOString()),
+          };
+          if (localMirrorDoc && localMirrorDoc.sessionVersion > fsDoc.sessionVersion) {
+            inMemoryCoreAdminCreds = localMirrorDoc;
+            return inMemoryCoreAdminCreds;
+          }
+          inMemoryCoreAdminCreds = fsDoc;
+          return inMemoryCoreAdminCreds;
+        }
+      }
+    } catch {}
+  }
+
+  // 2. Try reading via Firestore REST API (`/settings/core_admin_credentials`)
+  const cfg = getFirebaseServerConfig();
+  const token = await getFirestoreAccessToken().catch(() => null);
+  if (token || cfg.apiKey) {
+    try {
+      const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+      const keyParam = !token && cfg.apiKey ? `?key=${encodeURIComponent(cfg.apiKey)}` : '';
+      const docUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents/settings/core_admin_credentials${keyParam}`;
+      const res = await fetch(docUrl, { headers: authHeaders });
+      if (res.status === 429) {
+        firestoreQuotaCooldownUntil = Date.now() + 15 * 60 * 1000;
+      } else if (res.ok) {
+        const docJson: any = await res.json();
+        const parsed = fromFirestoreDocument(docJson);
+        if (parsed && typeof parsed.passwordHash === 'string' && parsed.passwordHash.startsWith('scrypt$')) {
+          const fsDoc: CoreAdminCredentialsDoc = {
+            passwordHash: parsed.passwordHash,
+            sessionVersion: Number(parsed.sessionVersion) || 1,
+            updatedAt: String(parsed.updatedAt || new Date().toISOString()),
+          };
+          if (localMirrorDoc && localMirrorDoc.sessionVersion > fsDoc.sessionVersion) {
+            inMemoryCoreAdminCreds = localMirrorDoc;
+            return inMemoryCoreAdminCreds;
+          }
+          inMemoryCoreAdminCreds = fsDoc;
+          return inMemoryCoreAdminCreds;
+        }
+      }
+    } catch {}
+  }
+
+  // 3. Fallback to local server-only file (`data/core_admin_credentials.json`)
+  if (localMirrorDoc) {
+    inMemoryCoreAdminCreds = localMirrorDoc;
+    return inMemoryCoreAdminCreds;
+  }
+
+  return null;
+}
+
+export async function saveCoreAdminCredentialsServer(doc: CoreAdminCredentialsDoc): Promise<void> {
+  inMemoryCoreAdminCreds = doc;
+  const settings = getDatabaseSettings();
+
+  // Save to local server-only mirror
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(CORE_ADMIN_CREDS_FILE, JSON.stringify(doc, null, 2), 'utf-8');
+  } catch {}
+
+  // Save to Firestore `/settings/core_admin_credentials` (includes required settings schema fields for security rules)
+  const payloadForFirestore = {
+    passwordHash: doc.passwordHash,
+    sessionVersion: doc.sessionVersion,
+    updatedAt: doc.updatedAt,
+    certificatePrefix: settings.certificatePrefix || 'PS/26/R',
+    certificateNextSeq: Math.max(1000, Number(settings.certificateNextSeq) || 1000842),
+    scrappingPrefix: settings.scrappingPrefix || 'REG-C',
+    scrappingNextSeq: Math.max(1000, Number(settings.scrappingNextSeq) || 273682),
+    serverWriteToken: SERVER_WRITE_TOKEN,
+  };
+
+  const adminDb = getFirebaseAdminDb();
+  if (adminDb) {
+    try {
+      await adminDb.collection('settings').doc('core_admin_credentials').set(payloadForFirestore, { merge: true });
+      return;
+    } catch (err: any) {
+      console.warn('[Firestore Admin Core Creds Save Notice]:', err.message);
+    }
+  }
+
+  const cfg = getFirebaseServerConfig();
+  const token = await getFirestoreAccessToken().catch(() => null);
+  if (token || cfg.apiKey) {
+    try {
+      const dbRoot = `projects/${cfg.projectId}/databases/${cfg.databaseId}/documents`;
+      const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+      const keyParam = !token && cfg.apiKey ? `?key=${encodeURIComponent(cfg.apiKey)}` : '';
+      const commitUrl = `https://firestore.googleapis.com/v1/${dbRoot}:commit${keyParam}`;
+      await fetch(commitUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders,
+        },
+        body: JSON.stringify({
+          writes: [
+            {
+              update: {
+                name: `${dbRoot}/settings/core_admin_credentials`,
+                fields: toFirestoreFields(payloadForFirestore),
+              },
+            },
+          ],
+        }),
+      });
+    } catch (err: any) {
+      console.warn('[Firestore REST Core Creds Save Notice]:', err.message);
+    }
+  }
+}
+
+/**
+ * Verifies the Main Core Admin password against Firestore hashed credentials.
+ * If no credentials exist in Firestore yet, initializes the salted scrypt hash
+ * using CORE_ADMIN_INITIAL_PASSWORD on first login. Once initialized or changed,
+ * ONLY the current Firestore passwordHash is accepted (old passwords never work).
+ */
+export async function authenticateCoreAdminPassword(providedPassword?: string): Promise<{
+  authenticated: boolean;
+  sessionVersion: number;
+  token?: string;
+}> {
+  if (!providedPassword || typeof providedPassword !== 'string') {
+    return { authenticated: false, sessionVersion: 1 };
+  }
+  const clean = providedPassword.trim();
+  if (!clean) {
+    return { authenticated: false, sessionVersion: 1 };
+  }
+
+  const stored = await getCoreAdminCredentialsServer(true);
+  if (stored && stored.passwordHash) {
+    const matched = verifyCoreAdminHash(clean, stored.passwordHash);
+    if (!matched) {
+      return { authenticated: false, sessionVersion: stored.sessionVersion };
+    }
+    const token = createCoreAdminToken(stored.sessionVersion);
+    return { authenticated: true, sessionVersion: stored.sessionVersion, token };
+  }
+
+  // First-time initialization from server-side CORE_ADMIN_INITIAL_PASSWORD
+  if (safeCompare(clean, CORE_ADMIN_INITIAL_PASSWORD)) {
+    const initialDoc: CoreAdminCredentialsDoc = {
+      passwordHash: hashCoreAdminPassword(clean),
+      sessionVersion: 1,
+      updatedAt: new Date().toISOString(),
+    };
+    await saveCoreAdminCredentialsServer(initialDoc);
+    const token = createCoreAdminToken(1);
+    return { authenticated: true, sessionVersion: 1, token };
+  }
+
+  return { authenticated: false, sessionVersion: 1 };
+}
+
+/**
+ * Changes the Main Core Admin password in Firestore:
+ * - Verifies oldPassword against current stored hash (or initial password if not yet initialized)
+ * - Enforces newPassword === confirmNewPassword and minimum 12 characters
+ * - Stores new salted scrypt hash in Firestore
+ * - Increments sessionVersion to immediately invalidate all previous Core Admin sessions
+ */
+export async function changeCoreAdminPasswordServer(
+  oldPassword?: string,
+  newPassword?: string,
+  confirmNewPassword?: string
+): Promise<{
+  success: boolean;
+  statusCode: number;
+  message: string;
+  sessionVersion?: number;
+}> {
+  const cleanOld = String(oldPassword ?? '').trim();
+  const cleanNew = String(newPassword ?? '').trim();
+  const cleanConfirm = String(confirmNewPassword ?? '').trim();
+
+  if (!cleanOld || !cleanNew || !cleanConfirm) {
+    return {
+      success: false,
+      statusCode: 400,
+      message: 'Old Password, New Password, and Confirm New Password are all required.',
+    };
+  }
+
+  if (cleanNew !== cleanConfirm) {
+    return {
+      success: false,
+      statusCode: 400,
+      message: 'New password and Confirm New Password do not match.',
+    };
+  }
+
+  if (cleanNew.length < 12) {
+    return {
+      success: false,
+      statusCode: 400,
+      message: 'New password must be at least 12 characters long.',
+    };
+  }
+
+  const authCheck = await authenticateCoreAdminPassword(cleanOld);
+  if (!authCheck.authenticated) {
+    return {
+      success: false,
+      statusCode: 401,
+      message: 'Incorrect Old Password. Password change rejected.',
+    };
+  }
+
+  const nextSessionVersion = (authCheck.sessionVersion || 1) + 1;
+  const newDoc: CoreAdminCredentialsDoc = {
+    passwordHash: hashCoreAdminPassword(cleanNew),
+    sessionVersion: nextSessionVersion,
+    updatedAt: new Date().toISOString(),
+  };
+
+  await saveCoreAdminCredentialsServer(newDoc);
+
+  return {
+    success: true,
+    statusCode: 200,
+    message: 'Main Core Admin password updated successfully. Previous Core Admin sessions have been invalidated.',
+    sessionVersion: nextSessionVersion,
+  };
+}
+
+/**
+ * Checks whether an incoming HTTP request has an active, non-invalidated MAIN_CORE_ADMIN session.
+ * Normal CERTIFICATE_MAKER tokens (`adm....`) NEVER satisfy this check.
+ */
+export async function isRequestCoreAdminAsync(req: any): Promise<boolean> {
+  const tokens = extractCoreAdminTokensFromReq(req);
+  if (tokens.length === 0) return false;
+
+  const stored = await getCoreAdminCredentialsServer(false);
+  const expectedVersion = stored?.sessionVersion || 1;
+
+  for (const token of tokens) {
+    if (verifyCoreAdminToken(token, expectedVersion)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -1341,13 +1728,40 @@ export async function createAndSaveCertificateRecordAsync(payload: any): Promise
 
     newCertificate.dataHash = computeCanonicalHash(newCertificate);
 
-    // 1. If Firebase Firestore Server Admin is configured, commit inside an atomic Firestore transaction
+    // 1. If Firebase Firestore Server Admin is configured, commit inside an atomic Firestore transaction with collision retry
     if (isFirestoreServerConfigured()) {
-      await commitCertificateToFirestoreServer(
-        newCertificate,
-        Math.max(settings.certificateNextSeq || 1000825, seqInfo.nextCertSeq + 1),
-        Math.max(settings.scrappingNextSeq || 273665, seqInfo.nextScrapSeq + 1)
-      );
+      let committed = false;
+      let commitAttempts = 0;
+      while (!committed && commitAttempts < 5) {
+        try {
+          await commitCertificateToFirestoreServer(
+            newCertificate,
+            Math.max(settings.certificateNextSeq || 1000842, seqInfo.nextCertSeq + 1),
+            Math.max(settings.scrappingNextSeq || 273682, seqInfo.nextScrapSeq + 1)
+          );
+          committed = true;
+        } catch (txErr: any) {
+          commitAttempts++;
+          const msg = String(txErr?.message || '');
+          const isCollision =
+            msg.includes('already reserved') ||
+            msg.includes('ALREADY_EXISTS') ||
+            msg.includes('409') ||
+            msg.includes('exists');
+          if (isCollision && commitAttempts < 5) {
+            const freshCerts = (await fetchCertificatesFromFirestoreServer(true).catch(() => certs)) || certs;
+            const retryAlloc = getNextSequentialNumbers(freshCerts, reserved, settings);
+            candidateCertNo = retryAlloc.candidateCertNo;
+            candidateScrapNo = retryAlloc.candidateScrapNo;
+            newCertificate.certificateNumber = candidateCertNo;
+            newCertificate.scrappingRegistrationNumber = candidateScrapNo;
+            newCertificate.verificationUrl = `/verify?certificateNumber=${encodeURIComponent(candidateCertNo)}&token=${newCertificate.qrToken}`;
+            newCertificate.dataHash = computeCanonicalHash(newCertificate);
+            continue;
+          }
+          throw txErr;
+        }
+      }
     }
 
     // 2. If PostgreSQL is configured, commit inside a database transaction

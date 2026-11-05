@@ -20,6 +20,8 @@ import {
   Database,
   Layers,
   Check,
+  Lock,
+  KeyRound,
 } from 'lucide-react';
 import type { DashboardStats, Certificate, DataIntegrityReport } from '../types';
 import { isDriveConnected, googleDriveSignIn, auth } from '../services/googleDriveAuth';
@@ -38,6 +40,8 @@ interface DashboardViewProps {
   onRefreshData?: () => void;
   isMainAdmin?: boolean;
   onRequestMainAdmin?: () => void;
+  onLogoutMainAdmin?: () => void;
+  onMainAdminPasswordChanged?: () => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -51,6 +55,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onRefreshData,
   isMainAdmin = false,
   onRequestMainAdmin,
+  onLogoutMainAdmin,
+  onMainAdminPasswordChanged,
 }) => {
   const [driveConnected, setDriveConnected] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<string>('Just now');
@@ -65,12 +71,26 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     message: string;
   } | null>(null);
 
+  // Change Main Admin Password form state
+  const [oldPassword, setOldPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [isChangingPassword, setIsChangingPassword] = useState(false);
+  const [passwordChangeAlert, setPasswordChangeAlert] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
+
   useEffect(() => {
     setDriveConnected(isDriveConnected());
+    const coreToken = sessionStorage.getItem('ps_core_admin_token') || '';
     // Fetch quick integrity numbers for dashboard stat cards
-    fetch('/api/integrity-check')
-      .then((res) => res.json())
-      .then((data: DataIntegrityReport) => {
+    fetch('/api/integrity-check', {
+      headers: coreToken ? { 'x-main-admin-token': coreToken } : {},
+      credentials: 'include',
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: DataIntegrityReport | null) => {
         if (data) {
           setSyncErrors(data.syncErrors || 0);
           setMissingPdfs(data.missingPdf || 0);
@@ -79,6 +99,80 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       .catch(() => {});
   }, [recentCertificates]);
 
+  const handleChangeMainAdminPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPasswordChangeAlert(null);
+
+    if (!oldPassword || !newPassword || !confirmNewPassword) {
+      setPasswordChangeAlert({
+        type: 'error',
+        message: 'All password fields are required.',
+      });
+      return;
+    }
+
+    if (newPassword !== confirmNewPassword) {
+      setPasswordChangeAlert({
+        type: 'error',
+        message: 'New password and confirmation do not match.',
+      });
+      return;
+    }
+
+    if (newPassword.length < 12) {
+      setPasswordChangeAlert({
+        type: 'error',
+        message: 'New password must be at least 12 characters long.',
+      });
+      return;
+    }
+
+    setIsChangingPassword(true);
+    try {
+      const coreToken = sessionStorage.getItem('ps_core_admin_token') || '';
+      const res = await fetch('/api/auth/change-main-admin-password', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(coreToken ? { 'x-main-admin-token': coreToken } : {}),
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          oldPassword,
+          newPassword,
+          confirmNewPassword,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.message || 'Failed to change Main Core Admin password.');
+      }
+
+      setOldPassword('');
+      setNewPassword('');
+      setConfirmNewPassword('');
+      setPasswordChangeAlert({
+        type: 'success',
+        message:
+          data.message ||
+          'Main Core Admin password updated in Firestore. Previous sessions have been invalidated.',
+      });
+
+      if (onMainAdminPasswordChanged) {
+        setTimeout(() => {
+          onMainAdminPasswordChanged();
+        }, 1800);
+      }
+    } catch (err: any) {
+      setPasswordChangeAlert({
+        type: 'error',
+        message: err.message || 'Could not update Main Core Admin password.',
+      });
+    } finally {
+      setIsChangingPassword(false);
+    }
+  };
+
   const handleBackupNowClick = async () => {
     setIsBackingUpNow(true);
     setBackupMessage(null);
@@ -86,10 +180,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       const token =
         localStorage.getItem('ps_admin_token') ||
         localStorage.getItem('pscrappers_admin_token') ||
-        'ps_admin_session_token_secure_2026';
+        '';
+      const coreToken = sessionStorage.getItem('ps_core_admin_token') || '';
       const res = await fetch('/api/backups/create', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(coreToken ? { 'x-main-admin-token': coreToken } : {}),
+        },
+        credentials: 'include',
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || 'Backup failed');
@@ -199,6 +298,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <ShieldCheck className="w-4 h-4 text-emerald-300" />
             PUBLIC VERIFY
           </button>
+          {onLogoutMainAdmin && (
+            <button
+              id="btn-dash-lock-core-admin"
+              type="button"
+              onClick={onLogoutMainAdmin}
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-rose-600/80 hover:bg-rose-600 text-white rounded-xl text-xs sm:text-sm font-bold border border-rose-400/30 transition-colors cursor-pointer"
+            >
+              <Lock className="w-4 h-4" />
+              LOCK CORE ADMIN
+            </button>
+          )}
         </div>
       </div>
 
@@ -360,7 +470,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             {latestCertNo}
           </p>
           <p className="text-[10px] text-slate-400 mt-1">
-            Atomic sequence
+            Random unique allocation
           </p>
         </div>
 
@@ -573,6 +683,125 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </tbody>
           </table>
         </div>
+      </div>
+
+      {/* Change Main Admin Password Section (Main Core Admin Only) */}
+      <div
+        id="change-main-admin-password-section"
+        className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden p-5 sm:p-6"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 pb-4 mb-5">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-700">
+              <KeyRound className="w-4 h-4" />
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-[#0d2847]">
+                Change Main Admin Password
+              </h2>
+              <p className="text-xs text-slate-500">
+                Update the Main Core Admin password stored as a salted cryptographic hash in Firestore. Minimum 12 characters.
+              </p>
+            </div>
+          </div>
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+            MAIN_CORE_ADMIN Protected
+          </span>
+        </div>
+
+        {passwordChangeAlert && (
+          <div
+            className={`mb-4 p-3.5 rounded-xl text-xs font-semibold flex items-center gap-2.5 ${
+              passwordChangeAlert.type === 'success'
+                ? 'bg-emerald-50 border border-emerald-300 text-emerald-900'
+                : 'bg-rose-50 border border-rose-300 text-rose-900'
+            }`}
+          >
+            {passwordChangeAlert.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+            )}
+            <span>{passwordChangeAlert.message}</span>
+          </div>
+        )}
+
+        <form onSubmit={handleChangeMainAdminPassword} className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-end">
+          <div>
+            <label
+              htmlFor="input-old-main-admin-password"
+              className="block text-xs font-semibold text-slate-700 mb-1"
+            >
+              Old Password *
+            </label>
+            <input
+              id="input-old-main-admin-password"
+              type="password"
+              value={oldPassword}
+              onChange={(e) => setOldPassword(e.target.value)}
+              required
+              autoComplete="current-password"
+              placeholder="Enter current Core Admin password"
+              className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#0d2847] outline-none"
+            />
+          </div>
+
+          <div>
+            <label
+              htmlFor="input-new-main-admin-password"
+              className="block text-xs font-semibold text-slate-700 mb-1"
+            >
+              New Password (min 12 chars) *
+            </label>
+            <input
+              id="input-new-main-admin-password"
+              type="password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              required
+              minLength={12}
+              autoComplete="new-password"
+              placeholder="At least 12 characters"
+              className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#0d2847] outline-none"
+            />
+          </div>
+
+          <div>
+            <label
+              htmlFor="input-confirm-main-admin-password"
+              className="block text-xs font-semibold text-slate-700 mb-1"
+            >
+              Confirm New Password *
+            </label>
+            <input
+              id="input-confirm-main-admin-password"
+              type="password"
+              value={confirmNewPassword}
+              onChange={(e) => setConfirmNewPassword(e.target.value)}
+              required
+              minLength={12}
+              autoComplete="new-password"
+              placeholder="Re-enter new password"
+              className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#0d2847] outline-none"
+            />
+          </div>
+
+          <div className="sm:col-span-3 flex items-center justify-between pt-2">
+            <p className="text-[11px] text-slate-500">
+              Saving a new password immediately invalidates all active Main Core Admin sessions and requires re-authentication.
+            </p>
+            <button
+              id="btn-save-main-admin-password"
+              type="submit"
+              disabled={isChangingPassword}
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-[#0d2847] hover:bg-[#163a63] text-white rounded-xl text-xs font-bold shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+            >
+              <Lock className="w-3.5 h-3.5 text-amber-300" />
+              <span>{isChangingPassword ? 'Saving New Password...' : 'Save New Password'}</span>
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );

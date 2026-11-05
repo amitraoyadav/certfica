@@ -13,6 +13,10 @@ import {
   isLiveCertificateIssuanceEnabled,
   updateCertificateInFirestoreServer,
   computeCanonicalHash,
+  getRecentCertificatesForMakerAsync,
+  authenticateCoreAdminPassword,
+  changeCoreAdminPasswordServer,
+  isRequestCoreAdminAsync,
 } from './_db.js';
 import {
   verifyAdminCredentials,
@@ -20,9 +24,6 @@ import {
   isRequestAdmin,
   buildSessionCookie,
   ADMIN_SESSION_TIMEOUT_MS,
-  verifyMainAdminPassword,
-  createMainAdminToken,
-  isMainAdminTokenValid,
   MAIN_ADMIN_TIMEOUT_MS,
   verifyProtectedActionPassword,
 } from './_auth.js';
@@ -173,11 +174,12 @@ export async function handleApiRequest(req: any, res: any) {
     return res.status(200).json({
       success: true,
       token,
+      role: 'CERTIFICATE_MAKER',
       user: {
         username: cleanUser,
-        role: 'administrator',
+        role: 'CERTIFICATE_MAKER',
       },
-      message: 'Welcome back! Administrator login successful.',
+      message: 'Welcome back! Certificate Maker login successful.',
     });
   }
 
@@ -185,13 +187,20 @@ export async function handleApiRequest(req: any, res: any) {
   // 3. Auth: /api/auth/me
   // ----------------------------------------------------
   if (pathname === '/api/auth/me' && method === 'GET') {
-    if (!isRequestAdmin(req)) {
+    const isMaker = isRequestAdmin(req);
+    const isCore = await isRequestCoreAdminAsync(req);
+    if (!isMaker && !isCore) {
       return res.status(401).json({ authenticated: false });
     }
     const settings = getSanitizedSettings();
     return res.status(200).json({
       authenticated: true,
-      user: { username: settings.adminUsername || 'pscrappers', role: 'administrator' },
+      role: isCore ? 'MAIN_CORE_ADMIN' : 'CERTIFICATE_MAKER',
+      isMainAdmin: isCore,
+      user: {
+        username: settings.adminUsername || 'pscrappers',
+        role: isCore ? 'MAIN_CORE_ADMIN' : 'CERTIFICATE_MAKER',
+      },
     });
   }
 
@@ -199,11 +208,12 @@ export async function handleApiRequest(req: any, res: any) {
   // 4. Auth: /api/auth/main-admin-status
   // ----------------------------------------------------
   if (pathname === '/api/auth/main-admin-status' && method === 'GET') {
-    const token =
-      req.headers?.['x-main-admin-token'] ||
-      (typeof query.mainAdminToken === 'string' ? query.mainAdminToken : '');
-    const valid = isMainAdminTokenValid(token) || isRequestAdmin(req);
-    return res.status(200).json({ isMainAdmin: valid });
+    const isCore = await isRequestCoreAdminAsync(req);
+    const isMaker = isRequestAdmin(req);
+    return res.status(200).json({
+      isMainAdmin: isCore,
+      role: isCore ? 'MAIN_CORE_ADMIN' : isMaker ? 'CERTIFICATE_MAKER' : 'PUBLIC',
+    });
   }
 
   // ----------------------------------------------------
@@ -211,19 +221,58 @@ export async function handleApiRequest(req: any, res: any) {
   // ----------------------------------------------------
   if (pathname === '/api/auth/verify-main-admin' && method === 'POST') {
     const providedPassword = String(body?.password ?? '').trim();
-    if (!verifyMainAdminPassword(providedPassword)) {
+    const authResult = await authenticateCoreAdminPassword(providedPassword);
+    if (!authResult.authenticated || !authResult.token) {
       return res.status(401).json({
         success: false,
-        message: 'Invalid Main Admin password. Access denied.',
+        message: 'Invalid Main Core Admin password. Access denied.',
       });
     }
-    const token = createMainAdminToken();
-    res.setHeader('Set-Cookie', buildSessionCookie('ps_main_admin_session', token, MAIN_ADMIN_TIMEOUT_MS));
+    res.setHeader(
+      'Set-Cookie',
+      buildSessionCookie('ps_core_admin_session', authResult.token, MAIN_ADMIN_TIMEOUT_MS)
+    );
     return res.status(200).json({
       success: true,
-      token,
+      token: authResult.token,
+      role: 'MAIN_CORE_ADMIN',
+      sessionVersion: authResult.sessionVersion,
       expiresInMs: MAIN_ADMIN_TIMEOUT_MS,
-      message: 'Main Admin access granted.',
+      message: 'Main Core Admin access granted.',
+    });
+  }
+
+  // ----------------------------------------------------
+  // 5b. Auth: /api/auth/change-main-admin-password
+  // ----------------------------------------------------
+  if (pathname === '/api/auth/change-main-admin-password' && method === 'POST') {
+    const isCore = await isRequestCoreAdminAsync(req);
+    if (!isCore) {
+      return res.status(403).json({
+        success: false,
+        message: 'Main Core Admin session required to change the Main Admin password.',
+      });
+    }
+
+    const oldPassword = String(body?.oldPassword ?? '').trim();
+    const newPassword = String(body?.newPassword ?? '').trim();
+    const confirmNewPassword = String(body?.confirmNewPassword ?? body?.confirmPassword ?? '').trim();
+
+    const changeResult = await changeCoreAdminPasswordServer(oldPassword, newPassword, confirmNewPassword);
+    if (!changeResult.success) {
+      return res.status(changeResult.statusCode).json({
+        success: false,
+        message: changeResult.message,
+      });
+    }
+
+    // Clear current session cookie so all Core Admin sessions require re-authentication with the new password
+    res.setHeader('Set-Cookie', buildSessionCookie('ps_core_admin_session', '', 0));
+    return res.status(200).json({
+      success: true,
+      sessionInvalidated: true,
+      sessionVersion: changeResult.sessionVersion,
+      message: changeResult.message,
     });
   }
 
@@ -231,25 +280,35 @@ export async function handleApiRequest(req: any, res: any) {
   // 6. Auth: /api/auth/logout & /api/auth/logout-main-admin
   // ----------------------------------------------------
   if (pathname === '/api/auth/logout' && method === 'POST') {
-    res.setHeader('Set-Cookie', buildSessionCookie('ps_admin_session', '', 0));
+    res.setHeader('Set-Cookie', [
+      buildSessionCookie('ps_admin_session', '', 0),
+      buildSessionCookie('ps_core_admin_session', '', 0),
+      buildSessionCookie('ps_main_admin_session', '', 0),
+    ]);
     return res.status(200).json({ success: true, message: 'Logged out of administrator session.' });
   }
 
   if (pathname === '/api/auth/logout-main-admin' && method === 'POST') {
-    res.setHeader('Set-Cookie', buildSessionCookie('ps_main_admin_session', '', 0));
-    return res.status(200).json({ success: true, message: 'Logged out of Main Admin session.' });
+    res.setHeader('Set-Cookie', [
+      buildSessionCookie('ps_core_admin_session', '', 0),
+      buildSessionCookie('ps_main_admin_session', '', 0),
+    ]);
+    return res.status(200).json({ success: true, message: 'Logged out of Main Core Admin session.' });
   }
 
   // ----------------------------------------------------
-  // 7. Settings: /api/settings (GET sanitized, PUT admin-protected)
+  // 7. Settings: /api/settings (GET sanitized, PUT Main Core Admin protected)
   // ----------------------------------------------------
   if (pathname === '/api/settings') {
     if (method === 'GET') {
       return res.status(200).json(getSanitizedSettings());
     }
     if (method === 'PUT') {
-      if (!isRequestAdmin(req)) {
-        return res.status(401).json({ message: 'Administrator authentication required.' });
+      const isCore = await isRequestCoreAdminAsync(req);
+      if (!isCore) {
+        return res.status(isRequestAdmin(req) ? 403 : 401).json({
+          message: 'Main Core Admin authentication required to modify system settings.',
+        });
       }
       const current = getDatabaseSettings();
       const updated = {
@@ -270,8 +329,10 @@ export async function handleApiRequest(req: any, res: any) {
   // 8. Read-Only Migration Check: /api/migration/read-live & /api/migration/firestore-status
   // ----------------------------------------------------
   if (pathname === '/api/migration/firestore-status' && method === 'GET') {
-    if (!isRequestAdmin(req)) {
-      return res.status(401).json({ message: 'Administrator authentication required.' });
+    if (!(await isRequestCoreAdminAsync(req))) {
+      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+        message: 'Main Core Admin authentication required.',
+      });
     }
     const status = await getFirestoreReadOnlyStatus();
     return res.status(200).json({
@@ -282,8 +343,10 @@ export async function handleApiRequest(req: any, res: any) {
   }
 
   if (pathname === '/api/migration/read-live' && method === 'POST') {
-    if (!isRequestAdmin(req)) {
-      return res.status(401).json({ message: 'Administrator authentication required for migration operations.' });
+    if (!(await isRequestCoreAdminAsync(req))) {
+      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+        message: 'Main Core Admin authentication required for migration operations.',
+      });
     }
     try {
       const checkResult = await runReadOnlyMigrationCheck();
@@ -402,24 +465,47 @@ export async function handleApiRequest(req: any, res: any) {
   }
 
   // ----------------------------------------------------
-  // 11. Stats: /api/stats
+  // 10b. Recent 5 Certificates for Certificate Maker: /api/certificates/recent
+  // ----------------------------------------------------
+  if (
+    (pathname === '/api/certificates/recent' ||
+      (pathname === '/api/certificates' && (query.recent === 'true' || query.scope === 'recent'))) &&
+    method === 'GET'
+  ) {
+    const isMaker = isRequestAdmin(req);
+    const isCore = await isRequestCoreAdminAsync(req);
+    if (!isMaker && !isCore) {
+      return res.status(401).json({
+        message: 'Certificate Maker login required to view recent certificates.',
+      });
+    }
+    const recentFive = await getRecentCertificatesForMakerAsync(5);
+    return res.status(200).json(recentFive);
+  }
+
+  // ----------------------------------------------------
+  // 11. Stats: /api/stats (Strictly restricted to MAIN_CORE_ADMIN)
   // ----------------------------------------------------
   if (pathname === '/api/stats' && method === 'GET') {
+    const isCore = await isRequestCoreAdminAsync(req);
+    if (!isCore) {
+      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+        message:
+          'Main Core Admin access required to view full database statistics and total certificate counts.',
+      });
+    }
     const certs = await getDatabaseCertificatesAsync();
     const active = certs.filter((c) => c.status === 'VALID' || c.status === 'ISSUED').length;
     const revoked = certs.filter((c) => c.status === 'REVOKED').length;
     const cancelled = certs.filter((c) => c.status === 'CANCELLED').length;
     const superseded = certs.filter((c) => c.status === 'SUPERSEDED').length;
 
-    const sortedBySeq = [...certs].sort((a, b) => {
-      const mA = String(a.certificateNumber || '').match(/(\d+)$/);
-      const mB = String(b.certificateNumber || '').match(/(\d+)$/);
-      const seqA = mA ? parseInt(mA[1], 10) : 0;
-      const seqB = mB ? parseInt(mB[1], 10) : 0;
-      if (seqA !== seqB) return seqB - seqA;
-      return (new Date(b.createdAt || 0).getTime() || 0) - (new Date(a.createdAt || 0).getTime() || 0);
+    const sortedByCreated = [...certs].sort((a, b) => {
+      const timeA = new Date(a.createdAt || a.issuedAt || 0).getTime() || 0;
+      const timeB = new Date(b.createdAt || b.issuedAt || 0).getTime() || 0;
+      return timeB - timeA;
     });
-    const latest = sortedBySeq.length > 0 ? sortedBySeq[0] : null;
+    const latest = sortedByCreated.length > 0 ? sortedByCreated[0] : null;
 
     const today = new Date().toISOString().split('T')[0];
     const currentMonth = today.substring(0, 7);
@@ -517,25 +603,27 @@ export async function handleApiRequest(req: any, res: any) {
   }
 
   // ----------------------------------------------------
-  // 13. Certificates: /api/certificates (GET list, POST create)
+  // 13. Certificates: /api/certificates (GET full list restricted to MAIN_CORE_ADMIN, POST create open to CERTIFICATE_MAKER & MAIN_CORE_ADMIN)
   // ----------------------------------------------------
   if (pathname === '/api/certificates') {
-    const certs = await getDatabaseCertificatesAsync();
-
     if (method === 'GET') {
+      const isCore = await isRequestCoreAdminAsync(req);
+      if (!isCore) {
+        return res.status(isRequestAdmin(req) ? 403 : 401).json({
+          message:
+            'Main Core Admin access required to view or search the complete certificate database.',
+        });
+      }
+      const certs = await getDatabaseCertificatesAsync();
       const q = typeof query.q === 'string' ? query.q.toLowerCase().trim() : '';
       const statusFilter = typeof query.status === 'string' ? query.status.toUpperCase() : '';
       const sort = query.sort === 'oldest' ? 'oldest' : 'newest';
 
       const sortedAll = [...certs].sort((a, b) => {
-        const mA = String(a.certificateNumber || '').match(/(\d+)$/);
-        const mB = String(b.certificateNumber || '').match(/(\d+)$/);
-        const seqA = mA ? parseInt(mA[1], 10) : 0;
-        const seqB = mB ? parseInt(mB[1], 10) : 0;
-        if (seqA !== seqB) return sort === 'oldest' ? seqA - seqB : seqB - seqA;
-        const timeA = new Date(a.createdAt || 0).getTime() || 0;
-        const timeB = new Date(b.createdAt || 0).getTime() || 0;
-        return sort === 'oldest' ? timeA - timeB : timeB - timeA;
+        const timeA = new Date(a.createdAt || a.issuedAt || 0).getTime() || 0;
+        const timeB = new Date(b.createdAt || b.issuedAt || 0).getTime() || 0;
+        if (timeA !== timeB) return sort === 'oldest' ? timeA - timeB : timeB - timeA;
+        return String(b.id || '').localeCompare(String(a.id || ''));
       });
 
       let filtered = sortedAll;
@@ -555,6 +643,8 @@ export async function handleApiRequest(req: any, res: any) {
       }
       return res.status(200).json(filtered);
     }
+
+    const certs = await getDatabaseCertificatesAsync();
 
     if (method === 'POST') {
       if (!isRequestAdmin(req)) {
@@ -830,7 +920,7 @@ export async function handleApiRequest(req: any, res: any) {
   }
 
   // ----------------------------------------------------
-  // 14. Auto-Sync, Bulk Import, Integrity & Migration Status Endpoints
+  // 14. Auto-Sync, Bulk Import, Integrity & Migration Status Endpoints (MAIN_CORE_ADMIN Protected)
   // ----------------------------------------------------
   if (
     (pathname === '/api/certificates/auto-sync' ||
@@ -839,6 +929,11 @@ export async function handleApiRequest(req: any, res: any) {
       pathname === '/api/certificates/sync-uploaded-certificate') &&
     method === 'POST'
   ) {
+    if (!(await isRequestCoreAdminAsync(req))) {
+      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+        message: 'Main Core Admin access required for full database synchronization.',
+      });
+    }
     const certs = await getDatabaseCertificatesAsync();
     return res.status(200).json({
       success: true,
@@ -851,6 +946,11 @@ export async function handleApiRequest(req: any, res: any) {
   }
 
   if (pathname === '/api/integrity-check' || pathname === '/api/audit/verify-all') {
+    if (!(await isRequestCoreAdminAsync(req))) {
+      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+        message: 'Main Core Admin access required for database integrity audit.',
+      });
+    }
     const certs = await getDatabaseCertificatesAsync();
     return res.status(200).json({
       status: 'HEALTHY',
@@ -867,6 +967,11 @@ export async function handleApiRequest(req: any, res: any) {
   }
 
   if (pathname === '/api/migration/status' && method === 'GET') {
+    if (!(await isRequestCoreAdminAsync(req))) {
+      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+        message: 'Main Core Admin access required.',
+      });
+    }
     const status = await getFirestoreReadOnlyStatus();
     return res.status(200).json({
       success: true,
@@ -875,6 +980,11 @@ export async function handleApiRequest(req: any, res: any) {
   }
 
   if (pathname === '/api/backups' && method === 'GET') {
+    if (!(await isRequestCoreAdminAsync(req))) {
+      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+        message: 'Main Core Admin access required.',
+      });
+    }
     const certs = await getDatabaseCertificatesAsync();
     return res.status(200).json({
       backups: [
@@ -889,6 +999,11 @@ export async function handleApiRequest(req: any, res: any) {
   }
 
   if (pathname === '/api/backups/create' && method === 'POST') {
+    if (!(await isRequestCoreAdminAsync(req))) {
+      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+        message: 'Main Core Admin access required.',
+      });
+    }
     const certs = await getDatabaseCertificatesAsync();
     return res.status(200).json({
       success: true,

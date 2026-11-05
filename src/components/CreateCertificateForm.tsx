@@ -17,6 +17,9 @@ import {
   FileCheck2,
   Cloud,
   RefreshCw,
+  KeyRound,
+  Download,
+  FileText,
 } from 'lucide-react';
 import type { Certificate } from '../types';
 import { maskChassisNumber, maskEngineNumber } from '../utils/maskUtils';
@@ -27,7 +30,12 @@ interface CreateCertificateFormProps {
   onCancel: () => void;
   onLogout?: () => void;
   onViewExistingCertificate?: (certNumber: string) => void;
+  onViewRecentCertificate?: (cert: Certificate) => void;
   onRequestReissue?: (cert: Certificate) => void;
+  recentCertificates?: Certificate[];
+  isMainAdmin?: boolean;
+  onRequestMainAdmin?: () => void;
+  onLogoutMainAdmin?: () => void;
 }
 
 const BIKE_BRANDS = [
@@ -59,7 +67,12 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
   onCancel,
   onLogout,
   onViewExistingCertificate,
+  onViewRecentCertificate,
   onRequestReissue,
+  recentCertificates = [],
+  isMainAdmin = false,
+  onRequestMainAdmin,
+  onLogoutMainAdmin,
 }) => {
   // Today's formatted date DD-MM-YYYY
   const getTodayFormatted = () => {
@@ -121,6 +134,7 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
     setAllowDuplicateOverride(false);
     setIncludeIdProof(false);
     setErrorMessage(null);
+    fetchNext(true);
   };
 
   interface DuplicateInfo {
@@ -498,6 +512,32 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
           >
             Pulsar Sample
           </button>
+
+          {!isMainAdmin && onRequestMainAdmin && (
+            <button
+              id="btn-form-main-core-admin"
+              type="button"
+              onClick={onRequestMainAdmin}
+              className="flex-1 sm:flex-none px-3.5 py-2 bg-slate-800/80 hover:bg-slate-700 text-amber-200 hover:text-white rounded-lg text-xs font-bold border border-amber-400/30 shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer min-h-[40px]"
+              title="Unlock Main Core Admin Dashboard"
+            >
+              <KeyRound className="w-3.5 h-3.5 text-amber-300" />
+              <span>Main Core Admin</span>
+            </button>
+          )}
+
+          {isMainAdmin && onLogoutMainAdmin && (
+            <button
+              id="btn-form-lock-core-admin"
+              type="button"
+              onClick={onLogoutMainAdmin}
+              className="flex-1 sm:flex-none px-3.5 py-2 bg-amber-600/30 hover:bg-amber-600 text-amber-200 hover:text-white rounded-lg text-xs font-bold border border-amber-400/40 shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer min-h-[40px]"
+              title="Lock Main Core Admin and return to Certificate Maker mode"
+            >
+              <Lock className="w-3.5 h-3.5" />
+              <span>Lock Core Admin</span>
+            </button>
+          )}
 
           {onLogout && (
             <button
@@ -1075,18 +1115,20 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
         {/* Action Buttons */}
         <div className="pt-4 border-t border-slate-200 flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onCancel}
-              className="px-5 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900 transition-colors cursor-pointer text-center min-h-[44px] flex items-center justify-center rounded-lg hover:bg-slate-100"
-            >
-              Cancel
-            </button>
+            {isMainAdmin && (
+              <button
+                type="button"
+                onClick={onCancel}
+                className="px-5 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900 transition-colors cursor-pointer text-center min-h-[44px] flex items-center justify-center rounded-lg hover:bg-slate-100"
+              >
+                Cancel
+              </button>
+            )}
             <button
               type="button"
               onClick={resetForm}
               className="px-4 py-2.5 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-lg transition-colors cursor-pointer"
-              title="Reset all fields to an empty form"
+              title="Reset all fields and generate new random certificate numbers"
             >
               Clear Form
             </button>
@@ -1114,6 +1156,116 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
           </div>
         </div>
       </form>
+
+      {/* ================================================== */}
+      {/* RECENT 5 CREATED CERTIFICATES PANEL (MAKER SCOPE) */}
+      {/* ================================================== */}
+      <div className="border-t border-slate-200 bg-slate-50/70 p-4 sm:p-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-[#0d2847] text-emerald-300 flex items-center justify-center shrink-0">
+              <FileText className="w-4 h-4" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-[#0d2847] uppercase tracking-wide">
+                Recent 5 Created Certificates
+              </h3>
+              <p className="text-[11px] text-slate-500">
+                Latest 5 issued certificates sorted by creation timestamp descending
+              </p>
+            </div>
+          </div>
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 text-[11px] font-bold self-start sm:self-auto">
+            <FileCheck2 className="w-3.5 h-3.5 text-emerald-600" />
+            Latest {Math.min(5, recentCertificates.length)} of 5 Recent
+          </span>
+        </div>
+
+        <div className="bg-white rounded-xl border border-slate-200 overflow-x-auto shadow-2xs">
+          <table className="w-full text-left border-collapse text-xs">
+            <thead>
+              <tr className="bg-slate-100/80 text-slate-600 text-[11px] uppercase font-bold border-b border-slate-200">
+                <th className="py-2.5 px-3.5">Certificate No.</th>
+                <th className="py-2.5 px-3.5">Scrap Reg. No.</th>
+                <th className="py-2.5 px-3.5">Owner Name</th>
+                <th className="py-2.5 px-3.5">Vehicle RC</th>
+                <th className="py-2.5 px-3.5">Issue Date</th>
+                <th className="py-2.5 px-3.5">Status</th>
+                <th className="py-2.5 px-3.5 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 text-slate-800">
+              {recentCertificates.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="py-6 text-center text-slate-400">
+                    No recent certificates to display.
+                  </td>
+                </tr>
+              ) : (
+                recentCertificates.slice(0, 5).map((cert) => (
+                  <tr key={cert.id} className="hover:bg-slate-50 transition-colors">
+                    <td className="py-2.5 px-3.5 font-mono font-bold text-[#0d2847]">
+                      {cert.certificateNumber}
+                    </td>
+                    <td className="py-2.5 px-3.5 font-mono text-emerald-800 font-semibold">
+                      {cert.scrappingRegistrationNumber}
+                    </td>
+                    <td className="py-2.5 px-3.5 font-semibold uppercase">
+                      {cert.ownerName}
+                    </td>
+                    <td className="py-2.5 px-3.5 font-mono text-slate-700">
+                      {cert.vehicleRegistrationNumber}
+                    </td>
+                    <td className="py-2.5 px-3.5 font-mono text-slate-600 text-[11px]">
+                      {cert.dateOfIssue}
+                    </td>
+                    <td className="py-2.5 px-3.5">
+                      <span
+                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                          cert.status === 'VALID' || cert.status === 'ISSUED'
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : 'bg-rose-100 text-rose-800'
+                        }`}
+                      >
+                        {cert.status}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-3.5 text-right">
+                      <div className="inline-flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (onViewRecentCertificate) {
+                              onViewRecentCertificate(cert);
+                            } else if (onViewExistingCertificate) {
+                              onViewExistingCertificate(cert.certificateNumber);
+                            }
+                          }}
+                          className="px-2.5 py-1 text-xs font-bold text-[#0d2847] bg-slate-100 hover:bg-slate-200 rounded-md flex items-center gap-1 transition-colors cursor-pointer"
+                          title="View Certificate"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          View
+                        </button>
+                        <a
+                          href={`/api/certificates/pdf/${encodeURIComponent(cert.certificateNumber)}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-2.5 py-1 text-xs font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md flex items-center gap-1 transition-colors"
+                          title="Download Official Certificate PDF"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          PDF
+                        </a>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
 
       {/* Confirmation Modal */}
       {showConfirmModal && (

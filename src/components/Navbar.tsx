@@ -7,8 +7,9 @@ import {
   Settings,
   Lock,
   LogOut,
-  ArrowLeft,
   ScanLine,
+  KeyRound,
+  ShieldAlert,
 } from 'lucide-react';
 import { PScrapLogo } from './PScrapLogo';
 
@@ -18,6 +19,7 @@ interface NavbarProps {
   isAdmin: boolean;
   onOpenLogin: () => void;
   onLogout: () => void;
+  onOpenDirectPdf?: () => void;
   isMainAdmin?: boolean;
   onRequestMainAdmin?: () => void;
   onLogoutMainAdmin?: () => void;
@@ -34,8 +36,6 @@ export const Navbar: React.FC<NavbarProps> = ({
   onRequestMainAdmin,
   onLogoutMainAdmin,
 }) => {
-  // If user is currently on verify or customer is viewing verified certificate,
-  // turn off all other tools (Settings, Create Certificate, All Certificates, Dashboard)
   const isVerificationMode = currentTab === 'verify' || (!isAdmin && currentTab === 'view-certificate');
 
   return (
@@ -45,7 +45,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           {/* Brand Logo & Name */}
           <button
             type="button"
-            onClick={() => onSelectTab(isAdmin ? (isVerificationMode ? 'create' : 'create') : 'verify')}
+            onClick={() => onSelectTab(isAdmin ? 'create' : 'verify')}
             className="flex items-center gap-2.5 sm:gap-3 text-left group cursor-pointer"
           >
             <PScrapLogo size="sm" variant="light" />
@@ -54,22 +54,26 @@ export const Navbar: React.FC<NavbarProps> = ({
                 PARIVAHAN SCRAPPERS
               </span>
               <span className="text-[10px] text-emerald-300 block leading-tight font-medium">
-                {isVerificationMode ? 'Official Verification Registry' : 'Vehicle Scrapping Certificate Registry'}
+                {isVerificationMode
+                  ? 'Official Verification Registry'
+                  : isMainAdmin
+                  ? 'Main Core Admin Console'
+                  : 'Private Certificate Maker Desk'}
               </span>
             </div>
           </button>
 
-          {/* Navigation Links - Strict Scope Control */}
-          <nav className="hidden md:flex items-center space-x-1">
+          {/* Navigation Links - Strict Role Isolation */}
+          <nav className="hidden md:flex items-center space-x-1.5">
             {isVerificationMode ? (
-              /* When in verification mode: Customer only sees Certification Tool */
               <div className="flex items-center gap-2">
                 <span className="px-3.5 py-1.5 rounded-lg bg-emerald-900/70 border border-emerald-600/40 text-emerald-200 text-xs font-bold flex items-center gap-2 shadow-xs">
                   <ShieldCheck className="w-4 h-4 text-emerald-400" />
                   Certification Tool
                 </span>
               </div>
-            ) : isAdmin ? (
+            ) : isAdmin && isMainAdmin ? (
+              /* MAIN_CORE_ADMIN: Full access to all tabs */
               <>
                 <button
                   id="nav-tab-create"
@@ -123,7 +127,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                   }`}
                 >
                   <LayoutDashboard className="w-4 h-4 text-emerald-400" />
-                  Dashboard
+                  Main Core Admin
                 </button>
 
                 <button
@@ -154,16 +158,48 @@ export const Navbar: React.FC<NavbarProps> = ({
                   Settings
                 </button>
 
+                {onLogoutMainAdmin && (
+                  <button
+                    id="nav-tab-lock-core-admin"
+                    type="button"
+                    onClick={onLogoutMainAdmin}
+                    className="px-2.5 py-2 rounded-md text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer text-amber-300 hover:text-white hover:bg-amber-900/40 border border-amber-600/40 ml-1"
+                    title="Exit Main Core Admin and return to restricted Certificate Maker mode"
+                  >
+                    <Lock className="w-3.5 h-3.5 text-amber-400" />
+                    Lock Core Admin
+                  </button>
+                )}
+              </>
+            ) : isAdmin ? (
+              /* CERTIFICATE_MAKER: Strictly restricted to Make Certificate + Discreet Main Core Admin button */
+              <>
                 <button
-                  id="nav-tab-logout"
+                  id="nav-tab-create"
                   type="button"
-                  onClick={onLogout}
-                  className="px-3 py-2 rounded-md text-sm font-bold flex items-center gap-1.5 transition-colors cursor-pointer text-rose-300 hover:text-white hover:bg-rose-900/40 border border-rose-700/40 ml-1"
-                  title="Sign out of Admin session"
+                  onClick={() => onSelectTab('create')}
+                  className={`px-3.5 py-2 rounded-md text-sm font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
+                    currentTab === 'create'
+                      ? 'bg-emerald-600 text-white shadow-xs'
+                      : 'bg-emerald-700/60 hover:bg-emerald-600 text-white'
+                  }`}
                 >
-                  <LogOut className="w-4 h-4 text-rose-400" />
-                  Logout
+                  <PlusCircle className="w-4 h-4 text-emerald-200" />
+                  Make Certificate
                 </button>
+
+                {onRequestMainAdmin && (
+                  <button
+                    id="nav-btn-main-core-admin"
+                    type="button"
+                    onClick={onRequestMainAdmin}
+                    className="px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer text-slate-300 hover:text-white bg-white/5 hover:bg-white/15 border border-white/15 ml-2"
+                    title="Unlock Main Core Admin Dashboard"
+                  >
+                    <KeyRound className="w-3.5 h-3.5 text-amber-300" />
+                    <span>Main Core Admin</span>
+                  </button>
+                )}
               </>
             ) : (
               <div className="flex items-center gap-2">
@@ -198,7 +234,6 @@ export const Navbar: React.FC<NavbarProps> = ({
           {/* Right Action / Auth Status */}
           <div className="flex items-center gap-2">
             {isVerificationMode ? (
-              /* When verifying: Customer NEVER sees Sign Out of login. Sees ONLY Admin Login Panel */
               <button
                 id="btn-nav-admin-login-panel"
                 type="button"
@@ -211,9 +246,16 @@ export const Navbar: React.FC<NavbarProps> = ({
               </button>
             ) : isAdmin ? (
               <div className="flex items-center gap-2">
-                <span className="hidden sm:inline-block text-xs bg-emerald-950/80 text-emerald-300 border border-emerald-700/50 px-2.5 py-1 rounded-full font-medium">
-                  Administrator
-                </span>
+                {isMainAdmin ? (
+                  <span className="hidden sm:inline-flex items-center gap-1 text-xs bg-amber-950/90 text-amber-300 border border-amber-600/50 px-2.5 py-1 rounded-full font-bold">
+                    <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+                    Main Core Admin
+                  </span>
+                ) : (
+                  <span className="hidden sm:inline-block text-xs bg-emerald-950/80 text-emerald-300 border border-emerald-700/50 px-2.5 py-1 rounded-full font-medium">
+                    Certificate Maker
+                  </span>
+                )}
                 <button
                   id="btn-admin-logout"
                   type="button"
@@ -245,7 +287,6 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* Mobile Navigation bar */}
         {isVerificationMode ? (
-          /* Mobile verification: ONLY Certification Tool and Admin Login Panel */
           <div className="md:hidden flex items-center justify-between py-2 px-3 border-t border-slate-700/60 bg-[#0a1f36]">
             <div className="flex items-center gap-1.5 text-emerald-300 font-bold text-xs">
               <ShieldCheck className="w-4 h-4" />
@@ -262,7 +303,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
         ) : (
           <div className="md:hidden flex items-center justify-around py-2.5 border-t border-slate-700 text-xs overflow-x-auto gap-1">
-            {isAdmin ? (
+            {isAdmin && isMainAdmin ? (
               <>
                 <button
                   type="button"
@@ -287,16 +328,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                 >
                   <span>All Certs</span>
                 </button>
-                {onOpenDirectPdf && (
-                  <button
-                    type="button"
-                    onClick={onOpenDirectPdf}
-                    className="px-2.5 py-2 rounded-lg whitespace-nowrap min-h-[40px] flex items-center gap-1 font-bold text-emerald-300 bg-emerald-950/60 border border-emerald-500/30"
-                  >
-                    <ScanLine className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Direct PDF</span>
-                  </button>
-                )}
                 <button
                   type="button"
                   onClick={() => onSelectTab('dashboard')}
@@ -306,18 +337,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                       : 'text-slate-300'
                   }`}
                 >
-                  Dashboard
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onSelectTab('verify')}
-                  className={`px-2.5 py-2 rounded-lg whitespace-nowrap min-h-[40px] flex items-center ${
-                    currentTab === 'verify'
-                      ? 'bg-slate-800 text-white font-bold'
-                      : 'text-slate-300'
-                  }`}
-                >
-                  Verify
+                  Core Admin
                 </button>
                 <button
                   type="button"
@@ -330,16 +350,38 @@ export const Navbar: React.FC<NavbarProps> = ({
                 >
                   Settings
                 </button>
+                {onLogoutMainAdmin && (
+                  <button
+                    type="button"
+                    onClick={onLogoutMainAdmin}
+                    className="px-2.5 py-2 rounded-lg whitespace-nowrap min-h-[40px] flex items-center gap-1 font-bold text-amber-300 bg-amber-950/60 border border-amber-700/50"
+                  >
+                    <Lock className="w-3.5 h-3.5" />
+                    Lock Core
+                  </button>
+                )}
+              </>
+            ) : isAdmin ? (
+              <div className="flex items-center justify-between w-full px-1 gap-2">
                 <button
                   type="button"
-                  onClick={onLogout}
-                  className="px-2.5 py-2 rounded-lg whitespace-nowrap min-h-[40px] flex items-center gap-1 font-bold text-rose-300 hover:text-white bg-rose-950/60 border border-rose-700/50"
-                  title="Sign out of Admin session"
+                  onClick={() => onSelectTab('create')}
+                  className="px-3 py-2 rounded-lg font-bold flex items-center gap-1.5 bg-emerald-600 text-white min-h-[40px]"
                 >
-                  <LogOut className="w-3.5 h-3.5 text-rose-400" />
-                  Logout
+                  <PlusCircle className="w-3.5 h-3.5" />
+                  Make Certificate
                 </button>
-              </>
+                {onRequestMainAdmin && (
+                  <button
+                    type="button"
+                    onClick={onRequestMainAdmin}
+                    className="px-3 py-2 rounded-lg font-semibold flex items-center gap-1.5 text-slate-200 bg-white/10 border border-white/15 min-h-[40px]"
+                  >
+                    <KeyRound className="w-3.5 h-3.5 text-amber-300" />
+                    Main Core Admin
+                  </button>
+                )}
+              </div>
             ) : (
               <div className="flex items-center justify-between w-full px-1 gap-2">
                 <button
