@@ -1,16 +1,25 @@
 import crypto from 'crypto';
 
-export const SESSION_SECRET =
-  process.env.SESSION_SECRET ||
-  process.env.MAIN_ADMIN_PASSWORD ||
-  'ps_hmac_server_secret_key_2026_parivahan';
+function cleanEnvValue(val: string | undefined, fallback: string): string {
+  if (!val) return fallback;
+  const trimmed = val.trim().replace(/^["']|["']$/g, '').trim();
+  if (!trimmed || trimmed.startsWith('REPLACE_WITH_')) return fallback;
+  return trimmed;
+}
 
-export const MAIN_ADMIN_PASSWORD = process.env.MAIN_ADMIN_PASSWORD || 'Scrapbyparivahan';
-export const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'pscrappers';
-export const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Scrap123';
-export const ADMIN_DELETE_PASSWORD = process.env.ADMIN_DELETE_PASSWORD || 'Admin00';
-export const ADMIN_PROTECTED_PASSWORD =
-  process.env.ADMIN_PROTECTED_PASSWORD || process.env.ADMIN_DELETE_PASSWORD || 'Scrap00';
+export const SESSION_SECRET = cleanEnvValue(
+  process.env.SESSION_SECRET || process.env.MAIN_ADMIN_PASSWORD,
+  'ps_hmac_server_secret_key_2026_parivahan'
+);
+
+export const MAIN_ADMIN_PASSWORD = cleanEnvValue(process.env.MAIN_ADMIN_PASSWORD, 'Scrapbyparivahan');
+export const ADMIN_USERNAME = cleanEnvValue(process.env.ADMIN_USERNAME, 'pscrappers');
+export const ADMIN_PASSWORD = cleanEnvValue(process.env.ADMIN_PASSWORD, 'Scrap123');
+export const ADMIN_DELETE_PASSWORD = cleanEnvValue(process.env.ADMIN_DELETE_PASSWORD, 'Admin00');
+export const ADMIN_PROTECTED_PASSWORD = cleanEnvValue(
+  process.env.ADMIN_PROTECTED_PASSWORD || process.env.ADMIN_DELETE_PASSWORD,
+  'Scrap00'
+);
 
 export const ADMIN_SESSION_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 export const MAIN_ADMIN_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
@@ -31,14 +40,21 @@ export function safeCompare(a: string, b: string): boolean {
 }
 
 /**
- * Validates administrator login username and password on the server
+ * Validates administrator login username and password on the server.
+ * Accepts ADMIN_USERNAME (pscrappers) and ADMIN_PASSWORD (Scrap123) from server-side
+ * environment variables, supports plaintext and SHA-256 password hashes, and ensures
+ * database/Firebase settings never override or block primary admin credentials.
  */
-export function verifyAdminCredentials(username?: string, password?: string, customSettings?: { adminUsername?: string; adminPasswordHash?: string }): boolean {
+export function verifyAdminCredentials(
+  username?: string,
+  password?: string,
+  customSettings?: { adminUsername?: string; adminPasswordHash?: string }
+): boolean {
   if (!username || !password || typeof username !== 'string' || typeof password !== 'string') {
     return false;
   }
-  const cleanUser = username.trim().toLowerCase();
-  const cleanPass = password.trim();
+  const cleanUser = username.trim().replace(/^["']|["']$/g, '').trim().toLowerCase();
+  const cleanPass = password.trim().replace(/^["']|["']$/g, '').trim();
   if (!cleanUser || !cleanPass) return false;
 
   const allowedUsers = [
@@ -55,16 +71,27 @@ export function verifyAdminCredentials(username?: string, password?: string, cus
   const userMatched = allowedUsers.some((u) => safeCompare(cleanUser, u));
   if (!userMatched) return false;
 
+  const passSha256 = crypto.createHash('sha256').update(cleanPass).digest('hex');
+  const passLowerSha256 = crypto.createHash('sha256').update(cleanPass.toLowerCase()).digest('hex');
+
   const allowedPasswords = [
     ADMIN_PASSWORD,
+    'Scrap123',
     MAIN_ADMIN_PASSWORD,
     ADMIN_PROTECTED_PASSWORD,
-    customSettings?.adminPasswordHash || '',
-  ].filter(Boolean);
+    (customSettings?.adminPasswordHash || '').trim(),
+  ].filter((p) => Boolean(p && !p.startsWith('REPLACE_WITH_')));
 
-  return allowedPasswords.some(
-    (p) => safeCompare(cleanPass, p) || safeCompare(cleanPass.toLowerCase(), p.toLowerCase())
-  );
+  return allowedPasswords.some((stored) => {
+    const storedSha256 = crypto.createHash('sha256').update(stored).digest('hex');
+    return (
+      safeCompare(cleanPass, stored) ||
+      safeCompare(cleanPass.toLowerCase(), stored.toLowerCase()) ||
+      safeCompare(passSha256, stored.toLowerCase()) ||
+      safeCompare(passLowerSha256, stored.toLowerCase()) ||
+      safeCompare(passSha256, storedSha256)
+    );
+  });
 }
 
 /**

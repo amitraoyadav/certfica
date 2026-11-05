@@ -6,10 +6,9 @@
   "website": "https://parivahan-scrappers.netlify.app/",
   "signatoryTitle": "Authorised Signatory",
   "certificatePrefix": "PS/26/R",
-  "certificateNextSeq": 1000825,
+  "certificateNextSeq": 1000842,
   "scrappingPrefix": "REG-C",
-  "scrappingNextSeq": 273664,
+  "scrappingNextSeq": 273682,
   "warnDuplicateVehicle": true,
-  "adminUsername": "pscrappers",
-  "adminPasswordHash": "Scrap123"
+  "adminUsername": "pscrappers"
 }

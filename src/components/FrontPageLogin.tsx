@@ -61,6 +61,7 @@ export const FrontPageLogin: React.FC<FrontPageLoginProps> = ({
     try {
       let data: any = null;
       let isOk = false;
+      let statusCode = 0;
 
       try {
         const res = await fetch('/api/auth/login', {
@@ -70,6 +71,7 @@ export const FrontPageLogin: React.FC<FrontPageLoginProps> = ({
           body: JSON.stringify({ username: cleanUsername, password: cleanPassword }),
         });
         isOk = res.ok;
+        statusCode = res.status;
         const text = await res.text();
         if (text) {
           try {
@@ -96,11 +98,17 @@ export const FrontPageLogin: React.FC<FrontPageLoginProps> = ({
         return;
       }
 
-      const failureMsg =
-        data?.message && !data.message.includes('Unexpected') && !data.message.includes('JSON')
-          ? data.message
-          : 'Incorrect Information. Please check your username and password.';
-      setErrorMessage(failureMsg);
+      if (statusCode === 401 || statusCode === 400) {
+        setErrorMessage(
+          data?.message || 'Incorrect Information. Please check your username and password.'
+        );
+      } else {
+        setErrorMessage(
+          data?.message && !data.message.includes('Unexpected') && !data.message.includes('JSON')
+            ? data.message
+            : 'Incorrect Information. Please check your username and password.'
+        );
+      }
     } catch {
       setErrorMessage('Incorrect Information. Please check your credentials.');
     } finally {

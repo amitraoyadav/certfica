@@ -5,6 +5,8 @@ import https from 'https';
 import http from 'http';
 import { URL } from 'url';
 import { Pool } from 'pg';
+import { initializeApp as initializeAdminApp, cert as adminCert, getApps as getAdminApps } from 'firebase-admin/app';
+import { getFirestore as getAdminFirestore, type Firestore as AdminFirestore } from 'firebase-admin/firestore';
 import type { Certificate, SystemSettings } from '../src/types';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
@@ -23,9 +25,9 @@ const DEFAULT_SETTINGS: SystemSettings = {
   website: 'https://parivahan-scrappers.netlify.app/',
   signatoryTitle: 'Authorised Signatory',
   certificatePrefix: 'PS/26/R',
-  certificateNextSeq: 1000825,
+  certificateNextSeq: 1000842,
   scrappingPrefix: 'REG-C',
-  scrappingNextSeq: 273665,
+  scrappingNextSeq: 273682,
   warnDuplicateVehicle: true,
   adminUsername: 'pscrappers',
 };
@@ -127,6 +129,53 @@ export function isFirestoreServerConfigured(): boolean {
 
 export function isLiveCertificateIssuanceEnabled(): boolean {
   return process.env.ENABLE_LIVE_CERTIFICATE_ISSUANCE !== 'false';
+}
+
+let cachedAdminDb: AdminFirestore | null = null;
+
+export function getFirebaseAdminDb(): AdminFirestore | null {
+  const cfg = getFirebaseServerConfig();
+  if (!cfg.serviceAccountConfigured) return null;
+  if (cachedAdminDb) return cachedAdminDb;
+
+  try {
+    let saJson: any = null;
+    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON && process.env.FIREBASE_SERVICE_ACCOUNT_JSON.trim()) {
+      try {
+        saJson = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON.trim());
+      } catch {}
+    }
+    const clientEmail = (process.env.FIREBASE_CLIENT_EMAIL || saJson?.client_email || '')
+      .trim()
+      .replace(/^["']|["']$/g, '');
+    const privateKey = (process.env.FIREBASE_PRIVATE_KEY || saJson?.private_key || '')
+      .trim()
+      .replace(/^["']|["']$/g, '')
+      .replace(/\\n/g, '\n');
+
+    if (!clientEmail || !privateKey || clientEmail.startsWith('REPLACE_WITH_')) {
+      return null;
+    }
+
+    const existingApps = getAdminApps();
+    const adminApp =
+      existingApps.length > 0
+        ? existingApps[0]
+        : initializeAdminApp({
+            credential: adminCert({
+              projectId: cfg.projectId,
+              clientEmail,
+              privateKey,
+            }),
+            projectId: cfg.projectId,
+          });
+
+    cachedAdminDb = getAdminFirestore(adminApp, cfg.databaseId);
+    return cachedAdminDb;
+  } catch (err: any) {
+    console.error('[Firebase Admin SDK Init Warning]:', err.message);
+    return null;
+  }
 }
 
 async function getFirestoreAccessToken(): Promise<string | null> {
@@ -258,15 +307,82 @@ export async function commitCertificateToFirestoreServer(
   nextScrapSeq: number
 ): Promise<boolean> {
   const cfg = getFirebaseServerConfig();
-  const token = await getFirestoreAccessToken().catch(() => null);
-  if (!token && !cfg.apiKey) return false;
-
-  const dbRoot = `projects/${cfg.projectId}/databases/${cfg.databaseId}/documents`;
   const certDocKey = newCertificate.certificateNumber.replace(/[^a-zA-Z0-9_\-]/g, '_').toUpperCase();
   const scrapDocKey = newCertificate.scrappingRegistrationNumber.replace(/[^a-zA-Z0-9_\-]/g, '_').toUpperCase();
   const now = new Date().toISOString();
   const auditId = `audit_issue_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
 
+  // 1. Primary path: Official Firebase Admin SDK with atomic Firestore transaction
+  const adminDb = getFirebaseAdminDb();
+  if (adminDb) {
+    await adminDb.runTransaction(async (tx) => {
+      const certRef = adminDb.collection('certificates').doc(newCertificate.id);
+      const resCertRef = adminDb.collection('reserved_certificate_numbers').doc(certDocKey);
+      const resScrapRef = adminDb.collection('reserved_scrapping_numbers').doc(scrapDocKey);
+      const settingsRef = adminDb.collection('settings').doc('system');
+      const auditRef = adminDb.collection('audit_logs').doc(auditId);
+
+      const [certSnap, resCertSnap, resScrapSnap] = await Promise.all([
+        tx.get(certRef),
+        tx.get(resCertRef),
+        tx.get(resScrapRef),
+      ]);
+
+      if (certSnap.exists || resCertSnap.exists) {
+        throw new Error(`Certificate number ${newCertificate.certificateNumber} is already reserved or issued.`);
+      }
+      if (resScrapSnap.exists) {
+        throw new Error(`Scrapping number ${newCertificate.scrappingRegistrationNumber} is already reserved or issued.`);
+      }
+
+      tx.create(certRef, {
+        ...(newCertificate as any),
+        serverWriteToken: SERVER_WRITE_TOKEN,
+      });
+      tx.create(resCertRef, {
+        certificateNumber: newCertificate.certificateNumber,
+        certificateId: newCertificate.id,
+        reservedAt: now,
+        serverWriteToken: SERVER_WRITE_TOKEN,
+      });
+      tx.create(resScrapRef, {
+        scrappingRegistrationNumber: newCertificate.scrappingRegistrationNumber,
+        certificateId: newCertificate.id,
+        reservedAt: now,
+        serverWriteToken: SERVER_WRITE_TOKEN,
+      });
+      tx.set(
+        settingsRef,
+        {
+          certificatePrefix: 'PS/26/R',
+          certificateNextSeq: nextCertSeq,
+          scrappingPrefix: 'REG-C',
+          scrappingNextSeq: nextScrapSeq,
+          updatedAt: now,
+          serverWriteToken: SERVER_WRITE_TOKEN,
+        },
+        { merge: true }
+      );
+      tx.create(auditRef, {
+        id: auditId,
+        action: 'CREATE_CERTIFICATE',
+        certificateId: newCertificate.id,
+        certificateNumber: newCertificate.certificateNumber,
+        details: `Issued certificate ${newCertificate.certificateNumber} (${newCertificate.scrappingRegistrationNumber}) for vehicle ${newCertificate.vehicleRegistrationNumber}`,
+        performedBy: newCertificate.createdBy || 'Admin',
+        timestamp: now,
+        serverWriteToken: SERVER_WRITE_TOKEN,
+      });
+    });
+    invalidateFirestoreCache();
+    return true;
+  }
+
+  // 2. Fallback path: Firestore REST API atomic :commit with currentDocument: { exists: false }
+  const token = await getFirestoreAccessToken().catch(() => null);
+  if (!token && !cfg.apiKey) return false;
+
+  const dbRoot = `projects/${cfg.projectId}/databases/${cfg.databaseId}/documents`;
   const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
   const keyParam = !token && cfg.apiKey ? `?key=${encodeURIComponent(cfg.apiKey)}` : '';
   const commitUrl = `https://firestore.googleapis.com/v1/${dbRoot}:commit${keyParam}`;
@@ -423,6 +539,19 @@ export async function updateCertificateInFirestoreServer(
 export async function fetchCertificatesFromFirestoreServer(forceRefresh = false): Promise<Certificate[] | null> {
   if (!forceRefresh && firestoreCertsCache && Date.now() - firestoreCertsCache.fetchedAt < 5000) {
     return firestoreCertsCache.certs;
+  }
+
+  // 1. Primary path: Official Firebase Admin SDK
+  const adminDb = getFirebaseAdminDb();
+  if (adminDb) {
+    const snap = await adminDb.collection('certificates').limit(2000).get();
+    const certs = snap.docs.map((d) => {
+      const data = { ...d.data() };
+      delete data.serverWriteToken;
+      return data as Certificate;
+    });
+    firestoreCertsCache = { certs, fetchedAt: Date.now() };
+    return certs;
   }
 
   const cfg = getFirebaseServerConfig();

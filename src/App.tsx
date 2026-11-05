@@ -501,6 +501,7 @@ export default function App() {
     sessionStorage.setItem('ps_logged_out', 'true');
     localStorage.removeItem('ps_admin_token');
     localStorage.removeItem('pscrappers_admin_token');
+    fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => {});
     setIsAdmin(false);
     setActiveTab('login');
     window.history.pushState({}, '', '/');

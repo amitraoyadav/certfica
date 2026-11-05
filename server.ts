@@ -1105,6 +1105,12 @@ export function configureExpressApp(): express.Application {
     }
   });
 
+  // Auth: Logout (clears HttpOnly ps_admin_session cookie)
+  app.post('/api/auth/logout', (_req, res) => {
+    res.setHeader('Set-Cookie', buildSessionCookie('ps_admin_session', '', 0));
+    res.json({ success: true, message: 'Logged out of administrator session.' });
+  });
+
   // Public: Check next sequential number without consuming it
   const handleNextNumbers = (req: express.Request, res: express.Response) => {
     const settings = getSettings();
