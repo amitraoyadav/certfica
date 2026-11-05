@@ -13,7 +13,7 @@ import {
   isLiveCertificateIssuanceEnabled,
   updateCertificateInFirestoreServer,
   computeCanonicalHash,
-} from './_db';
+} from './_db.js';
 import {
   verifyAdminCredentials,
   createAdminSessionToken,
@@ -25,7 +25,7 @@ import {
   isMainAdminTokenValid,
   MAIN_ADMIN_TIMEOUT_MS,
   verifyProtectedActionPassword,
-} from './_auth';
+} from './_auth.js';
 import { jsPDF } from 'jspdf';
 import QRCode from 'qrcode';
 import type { Certificate } from '../src/types';

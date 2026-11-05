@@ -1,4 +1,4 @@
-import { handleApiRequest } from './_handlers';
+import { handleApiRequest } from './_handlers.js';
 
 /**
  * Vercel Serverless Function Catch-All Entry Point (/api/[...path]).

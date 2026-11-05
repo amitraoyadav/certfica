@@ -1,4 +1,4 @@
-import { handleApiRequest } from './_handlers';
+import { handleApiRequest } from './_handlers.js';
 
 /**
  * Primary Vercel Serverless Function Entry Point.

@@ -71,7 +71,7 @@ import {
   getDatabaseCertificatesAsync,
   getFirestoreReadOnlyStatus,
   isLiveCertificateIssuanceEnabled,
-} from './api/_db';
+} from './api/_db.js';
 import {
   verifyAdminCredentials,
   createAdminSessionToken,
@@ -83,7 +83,7 @@ import {
   isMainAdminTokenValid,
   MAIN_ADMIN_TIMEOUT_MS,
   verifyProtectedActionPassword,
-} from './api/_auth';
+} from './api/_auth.js';
 
 function fetchFromLiveProduction(endpoint: string): Promise<any> {
   return fetchFromOriginalWebsite(endpoint);
