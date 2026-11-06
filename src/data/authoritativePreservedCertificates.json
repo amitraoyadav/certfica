@@ -9835,7 +9835,10 @@
     },
     "createdAt": "2026-11-04T05:37:42.528Z",
     "updatedAt": "2026-11-04T05:37:42.528Z",
-    "dataHash": "9ef7b11145948c6723d9a9e57e7c5721cd2f27846ad895503a30e633ff82e97c"
+    "dataHash": "9ef7b11145948c6723d9a9e57e7c5721cd2f27846ad895503a30e633ff82e97c",
+    "aliases": [
+      "PS/26/RZHQZ66"
+    ]
   },
   {
     "id": "cert-r1000-40",
@@ -10862,6 +10865,47 @@
       "PS/26/R1054"
     ],
     "showFullChassisEngine": false
+  },
+  {
+    "id": "cert-1793905192088-e02fc8d2ba54",
+    "certificateNumber": "PS/26/R1000843",
+    "scrappingRegistrationNumber": "REG-C273683",
+    "ownerName": "SUDHIR",
+    "address": "sudhira",
+    "idProofNumber": "Not Provided",
+    "vehicleRegistrationNumber": "DL3239239",
+    "chassisNumber": "CHAIS2323",
+    "engineNumber": "CHIS",
+    "showFullChassisEngine": false,
+    "make": "Honda",
+    "model": "alloy",
+    "location": "Delhi NCR",
+    "yearOfManufacture": "2012",
+    "dateOfHandover": "06-11-2026",
+    "dateOfIssue": "06-11-2026",
+    "qrToken": "tok_50b90c7a65968017",
+    "verificationUrl": "/verify?certificateNumber=PS%2F26%2FR1000843&token=tok_50b90c7a65968017",
+    "status": "VALID",
+    "isLocked": true,
+    "isImmutable": true,
+    "version": 1,
+    "issuedAt": "2026-11-05T18:59:52.088Z",
+    "lockedAt": "2026-11-05T18:59:52.088Z",
+    "createdBy": "Admin",
+    "companySnapshot": {
+      "companyName": "PARIVAHAN SCRAPPERS",
+      "companySubtitle": "A Unit OF Scrapping Yard Ltd.",
+      "address": "B12, Dwarka, New Delhi.",
+      "phone": "8506925495",
+      "website": "https://parivahan-scrappers.netlify.app/",
+      "signatoryTitle": "Authorised Signatory"
+    },
+    "createdAt": "2026-11-05T18:59:52.088Z",
+    "updatedAt": "2026-11-05T18:59:52.088Z",
+    "dataHash": "f970dd4942e8c2b0e9753a27be237a935ed45dae37fbf8aaec10f6005c532406",
+    "aliases": [
+      "PS/26/R1000843"
+    ]
   },
   {
     "id": "cert-imp-1791292137725-f9799221d9",
@@ -19498,7 +19542,10 @@
     },
     "createdAt": "2026-11-04T05:37:18.691Z",
     "updatedAt": "2026-11-04T05:37:18.691Z",
-    "dataHash": "c531882cdbc6f0f3c80196c9a15f36e02acaf3b2016fbbc219b3e0cad7fdd5f2"
+    "dataHash": "c531882cdbc6f0f3c80196c9a15f36e02acaf3b2016fbbc219b3e0cad7fdd5f2",
+    "aliases": [
+      "PS/26/RE7SPLZ"
+    ]
   },
   {
     "id": "cert-imp-1791285610986-30c5c167fb",
@@ -28877,7 +28924,10 @@
     },
     "createdAt": "2026-11-04T05:37:41.738Z",
     "updatedAt": "2026-11-04T05:37:41.738Z",
-    "dataHash": "ddff865a86c25da8cf5082f1d2c7dcab7dbb83152d5c74ad431abb0e67b5cf4a"
+    "dataHash": "ddff865a86c25da8cf5082f1d2c7dcab7dbb83152d5c74ad431abb0e67b5cf4a",
+    "aliases": [
+      "PS/26/RX5QTVT"
+    ]
   },
   {
     "id": "cert-imp-1791292722732-1dea468024",
@@ -31665,6 +31715,47 @@
     "dataHash": "9c7f775c8cb1eadfc13e4eaa23a37b10cc4efc8f95887138f6a8f37a5e370a77"
   },
   {
+    "id": "cert-1793905111573-a48793462af8",
+    "certificateNumber": "PS/26/R1000842",
+    "scrappingRegistrationNumber": "REG-C273682",
+    "ownerName": "SDSD",
+    "address": "sd",
+    "idProofNumber": "Not Provided",
+    "vehicleRegistrationNumber": "ASD",
+    "chassisNumber": "SAFAD`Q`SADA`",
+    "engineNumber": "SFADSD",
+    "showFullChassisEngine": false,
+    "make": "Honda",
+    "model": "sadsad",
+    "location": "Delhi NCR",
+    "yearOfManufacture": "2012",
+    "dateOfHandover": "06-11-2026",
+    "dateOfIssue": "06-11-2026",
+    "qrToken": "tok_6ee3285b334c567a",
+    "verificationUrl": "/verify?certificateNumber=PS%2F26%2FR1000842&token=tok_6ee3285b334c567a",
+    "status": "VALID",
+    "isLocked": true,
+    "isImmutable": true,
+    "version": 1,
+    "issuedAt": "2026-11-05T18:58:31.573Z",
+    "lockedAt": "2026-11-05T18:58:31.573Z",
+    "createdBy": "Admin",
+    "companySnapshot": {
+      "companyName": "PARIVAHAN SCRAPPERS",
+      "companySubtitle": "A Unit OF Scrapping Yard Ltd.",
+      "address": "B12, Dwarka, New Delhi.",
+      "phone": "8506925495",
+      "website": "https://parivahan-scrappers.netlify.app/",
+      "signatoryTitle": "Authorised Signatory"
+    },
+    "createdAt": "2026-11-05T18:58:31.573Z",
+    "updatedAt": "2026-11-05T18:58:31.573Z",
+    "dataHash": "cca7fa27ce9bcc324cebba13b40b071237111f883c33d5eb0eed7e71795a577d",
+    "aliases": [
+      "PS/26/R1000842"
+    ]
+  },
+  {
     "id": "cert-imp-1791293878261-e47df5fb35",
     "certificateNumber": "PS/26/R1000502",
     "scrappingRegistrationNumber": "REG-C273343",
@@ -32879,6 +32970,47 @@
     "dataHash": "4852ea8fe5e44ccbd60f993acc7840e16c58f7ac795a0126fc70d6d23a127ac8"
   },
   {
+    "id": "cert-1793981234217-21987ccfac7b",
+    "certificateNumber": "PS/26/R4170606",
+    "scrappingRegistrationNumber": "REG-C784779",
+    "ownerName": "DELHI",
+    "address": "dsakd",
+    "idProofNumber": "Not Provided",
+    "vehicleRegistrationNumber": "ASDAJSD3434",
+    "chassisNumber": "QSADSAKD",
+    "engineNumber": "SADSADSAD",
+    "showFullChassisEngine": false,
+    "make": "Honda",
+    "model": "sadsad",
+    "location": "Delhi NCR",
+    "yearOfManufacture": "2012",
+    "dateOfHandover": "06-11-2026",
+    "dateOfIssue": "06-11-2026",
+    "qrToken": "tok_c41255d6fbbc0ad3",
+    "verificationUrl": "/verify?certificateNumber=PS%2F26%2FR4170606&token=tok_c41255d6fbbc0ad3",
+    "status": "VALID",
+    "isLocked": true,
+    "isImmutable": true,
+    "version": 1,
+    "issuedAt": "2026-11-06T16:07:14.217Z",
+    "lockedAt": "2026-11-06T16:07:14.217Z",
+    "createdBy": "Admin",
+    "companySnapshot": {
+      "companyName": "PARIVAHAN SCRAPPERS",
+      "companySubtitle": "A Unit OF Scrapping Yard Ltd.",
+      "address": "B12, Dwarka, New Delhi.",
+      "phone": "8506925495",
+      "website": "https://parivahan-scrappers.netlify.app/",
+      "signatoryTitle": "Authorised Signatory"
+    },
+    "createdAt": "2026-11-06T16:07:14.217Z",
+    "updatedAt": "2026-11-06T16:07:14.217Z",
+    "dataHash": "27f381ef19f41bf1fa02976bf3ea8bb92077ebd349a7c153c359d651e6425b71",
+    "aliases": [
+      "PS/26/R4170606"
+    ]
+  },
+  {
     "id": "cert-1791867405294-3e8616204b48",
     "certificateNumber": "PS/26/R1000641",
     "scrappingRegistrationNumber": "REG-C273481",
@@ -33481,6 +33613,47 @@
     ],
     "issuedAt": "2026-10-08T07:59:14.930Z",
     "dataHash": "89765bd482cd537e50b3bc24f1b51d423fd4a41c951d19cff87f0c41c6c8853c"
+  },
+  {
+    "id": "cert-1793905517174-d11771444fde",
+    "certificateNumber": "PS/26/R1000844",
+    "scrappingRegistrationNumber": "REG-C273684",
+    "ownerName": "RAO SAAHAB",
+    "address": "delhi",
+    "idProofNumber": "Not Provided",
+    "vehicleRegistrationNumber": "DL67676",
+    "chassisNumber": "XCEEWE3434324323",
+    "engineNumber": "XCFEFR343434W",
+    "showFullChassisEngine": false,
+    "make": "Honda",
+    "model": "DISCOVER 125",
+    "location": "Delhi NCR",
+    "yearOfManufacture": "2012",
+    "dateOfHandover": "06-11-2026",
+    "dateOfIssue": "06-11-2026",
+    "qrToken": "tok_4bc5bd15bab36ed4",
+    "verificationUrl": "/verify?certificateNumber=PS%2F26%2FR1000844&token=tok_4bc5bd15bab36ed4",
+    "status": "VALID",
+    "isLocked": true,
+    "isImmutable": true,
+    "version": 1,
+    "issuedAt": "2026-11-05T19:05:17.174Z",
+    "lockedAt": "2026-11-05T19:05:17.174Z",
+    "createdBy": "Admin",
+    "companySnapshot": {
+      "companyName": "PARIVAHAN SCRAPPERS",
+      "companySubtitle": "A Unit OF Scrapping Yard Ltd.",
+      "address": "B12, Dwarka, New Delhi.",
+      "phone": "8506925495",
+      "website": "https://parivahan-scrappers.netlify.app/",
+      "signatoryTitle": "Authorised Signatory"
+    },
+    "createdAt": "2026-11-05T19:05:17.174Z",
+    "updatedAt": "2026-11-05T19:05:17.174Z",
+    "dataHash": "f1a2e7b781ebb22880452612cfa67afe275e93512e6f975714afd6571ca37891",
+    "aliases": [
+      "PS/26/R1000844"
+    ]
   },
   {
     "id": "cert-r1000-13",
@@ -36069,7 +36242,10 @@
     "location": "Delhi NCR",
     "verificationUrl": "/verify?certificateNumber=PS%2F26%2FRA94TCK&token=tok_19fe5046967dc1e9",
     "showFullChassisEngine": false,
-    "status": "VALID"
+    "status": "VALID",
+    "aliases": [
+      "PS/26/RA94TCK"
+    ]
   },
   {
     "id": "cert-1792663421103-1871b601a70a",

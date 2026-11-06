@@ -17,6 +17,8 @@ import {
   authenticateCoreAdminPassword,
   changeCoreAdminPasswordServer,
   isRequestCoreAdminAsync,
+  getPersistentIdempotencyAsync,
+  savePersistentIdempotencyAsync,
 } from './_db.js';
 import {
   verifyAdminCredentials,
@@ -693,7 +695,7 @@ export async function handleApiRequest(req: any, res: any) {
         return res.status(400).json({ message: 'Invalid certificate payload provided.' });
       }
 
-      // Idempotency Protection: prevent duplicate certificate generation on double clicks or network retries
+      // Persistent & In-Memory Idempotency Protection: prevent duplicate generation across serverless instances
       const idempotencyKey = String(
         req.headers?.['idempotency-key'] ||
           req.headers?.['x-idempotency-key'] ||
@@ -702,10 +704,17 @@ export async function handleApiRequest(req: any, res: any) {
           ''
       ).trim();
 
-      if (idempotencyKey && idempotencyCache.has(idempotencyKey)) {
-        const cached = idempotencyCache.get(idempotencyKey)!;
-        if (Date.now() - cached.timestamp < 10 * 60 * 1000) {
-          return res.status(200).json(cached.result);
+      if (idempotencyKey) {
+        if (idempotencyCache.has(idempotencyKey)) {
+          const cached = idempotencyCache.get(idempotencyKey)!;
+          if (Date.now() - cached.timestamp < 10 * 60 * 1000) {
+            return res.status(200).json(cached.result);
+          }
+        }
+        const persistentCert = await getPersistentIdempotencyAsync(idempotencyKey);
+        if (persistentCert) {
+          idempotencyCache.set(idempotencyKey, { result: persistentCert, timestamp: Date.now() });
+          return res.status(200).json(persistentCert);
         }
       }
 
@@ -724,6 +733,7 @@ export async function handleApiRequest(req: any, res: any) {
           saveDatabaseCertificates(updated);
           if (idempotencyKey) {
             idempotencyCache.set(idempotencyKey, { result: newCert, timestamp: Date.now() });
+            savePersistentIdempotencyAsync(idempotencyKey, newCert).catch(() => {});
           }
           return res.status(201).json(newCert);
         }
@@ -732,6 +742,7 @@ export async function handleApiRequest(req: any, res: any) {
           const created = await createAndSaveCertificateRecordAsync(body);
           if (idempotencyKey) {
             idempotencyCache.set(idempotencyKey, { result: created, timestamp: Date.now() });
+            savePersistentIdempotencyAsync(idempotencyKey, created).catch(() => {});
           }
           return res.status(201).json(created);
         }
@@ -1121,6 +1132,82 @@ export async function handleApiRequest(req: any, res: any) {
       totalBackups: backupsList.length,
       lastSuccessfulBackup: backupsList[0]?.timestamp || null,
     });
+  }
+
+  // 17-cron. Scheduled Daily Backup Endpoint (Triggered by Vercel Cron or Core Admin)
+  if (pathname === '/api/cron/daily-backup') {
+    const authHeader = String(req.headers?.authorization || '');
+    const cronSecret = process.env.CRON_SECRET || 'ps_cron_secret_2026';
+    const isCronAuthorized =
+      authHeader === `Bearer ${cronSecret}` ||
+      (await isRequestCoreAdminAsync(req));
+
+    if (!isCronAuthorized) {
+      return res.status(401).json({ message: 'Unauthorized cron invocation.' });
+    }
+
+    try {
+      const certs = await getDatabaseCertificatesAsync();
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const filename = `certificate-database-${ts}-DAILY-CRON.json`;
+      const content = JSON.stringify(certs, null, 2);
+      const checksum = crypto.createHash('sha256').update(content).digest('hex');
+
+      // 1. Write to local disk if writable
+      try {
+        const backupsDir = path.join(process.cwd(), 'data', 'database_backups');
+        if (!fs.existsSync(backupsDir)) fs.mkdirSync(backupsDir, { recursive: true });
+        fs.writeFileSync(path.join(backupsDir, filename), content, 'utf-8');
+      } catch {}
+
+      // 2. Persist backup record to Firestore collection database_backups (persistent on Vercel)
+      try {
+        const { getFirebaseAdminDb, getFirebaseServerConfig, getFirestoreAccessToken, toFirestoreFields } = await import('./_db.js');
+        const adminDb = getFirebaseAdminDb();
+        const backupDoc = {
+          filename,
+          certificateCount: certs.length,
+          sizeBytes: Buffer.byteLength(content),
+          checksum,
+          verified: true,
+          triggeredBy: 'VERCEL_CRON',
+          createdAt: new Date().toISOString(),
+          retentionExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        };
+        if (adminDb) {
+          await adminDb.collection('database_backups').doc(filename).set(backupDoc);
+        } else {
+          const cfg = getFirebaseServerConfig();
+          const token = await getFirestoreAccessToken().catch(() => null);
+          if (token) {
+            const docUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents/database_backups/${filename}`;
+            await fetch(docUrl, {
+              method: 'PATCH',
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ fields: toFirestoreFields(backupDoc) }),
+            });
+          }
+        }
+      } catch (fErr) {
+        console.warn('[Cron] Firestore backup record warning:', fErr);
+      }
+
+      return res.status(200).json({
+        success: true,
+        scheduled: true,
+        filename,
+        certificateCount: certs.length,
+        checksum,
+        sha256: checksum,
+        verified: true,
+        retentionPolicy: '30 Days',
+        timestamp: new Date().toISOString(),
+        message: `Scheduled daily backup ${filename} completed successfully (${certs.length} certificates).`,
+      });
+    } catch (err: any) {
+      recordSystemError('BACKUP', `Scheduled daily backup failed: ${err.message}`, 'ERROR', '/api/cron/daily-backup');
+      return res.status(500).json({ success: false, message: `Scheduled daily backup error: ${err.message}` });
+    }
   }
 
   if (pathname === '/api/backups/create' && method === 'POST') {

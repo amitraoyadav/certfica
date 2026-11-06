@@ -76,6 +76,9 @@ import {
   changeCoreAdminPasswordServer,
   isRequestCoreAdminAsync,
   createAndSaveCertificateRecordAsync,
+  getPersistentIdempotencyAsync,
+  savePersistentIdempotencyAsync,
+  EXCLUDED_SYNTHETIC_TEST_IDS,
 } from './api/_db.js';
 import {
   verifyAdminCredentials,
@@ -810,7 +813,9 @@ function getCertificates(): Certificate[] {
     list = INITIAL_CERTIFICATES;
   }
 
-  return deduplicateCertificates(list);
+  return deduplicateCertificates(list).filter(
+    (c) => c && c.id && !EXCLUDED_SYNTHETIC_TEST_IDS.has(c.id)
+  );
 }
 
 function saveCertificates(certificates: Certificate[], skipBackupSnapshot = false): void {
@@ -2062,10 +2067,17 @@ export function configureExpressApp(): express.Application {
           ''
       ).trim();
 
-      if (idempotencyKey && idempotencyStore.has(idempotencyKey)) {
-        const cached = idempotencyStore.get(idempotencyKey)!;
-        if (Date.now() - cached.timestamp < 10 * 60 * 1000) {
-          return res.status(200).json(cached.cert);
+      if (idempotencyKey) {
+        if (idempotencyStore.has(idempotencyKey)) {
+          const cached = idempotencyStore.get(idempotencyKey)!;
+          if (Date.now() - cached.timestamp < 10 * 60 * 1000) {
+            return res.status(200).json(cached.cert);
+          }
+        }
+        const persistentCert = await getPersistentIdempotencyAsync(idempotencyKey);
+        if (persistentCert) {
+          idempotencyStore.set(idempotencyKey, { cert: persistentCert, timestamp: Date.now() });
+          return res.status(200).json(persistentCert);
         }
       }
 
@@ -2078,6 +2090,7 @@ export function configureExpressApp(): express.Application {
 
       if (idempotencyKey) {
         idempotencyStore.set(idempotencyKey, { cert: newCertificate, timestamp: Date.now() });
+        savePersistentIdempotencyAsync(idempotencyKey, newCertificate).catch(() => {});
       }
 
       res.status(201).json(newCertificate);
@@ -3541,8 +3554,13 @@ Return strictly raw JSON.`;
   // =========================================================================
 
   // Migration Status & Overview
-  app.get('/api/migration/status', (req, res) => {
+  app.get('/api/migration/status', async (req, res) => {
     try {
+      if (!(await isRequestCoreAdminAsync(req))) {
+        return res.status(isAdmin(req) ? 403 : 401).json({
+          message: 'Main Core Admin access required.',
+        });
+      }
       const certs = getCertificates();
       const exportDir = EXPORTS_DIR;
       const manifestPath = path.join(exportDir, 'MIGRATION_MANIFEST.json');

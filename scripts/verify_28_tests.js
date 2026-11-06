@@ -341,6 +341,18 @@ async function runAll28Tests() {
 
     const passed = resA.status === 201 && resB.status === 200 && dataA.certificateNumber === dataB.certificateNumber;
     recordTest(24, 'Double-click prevention: rapid duplicate submissions return same certificate without creating second record', passed, `Original: ${dataA.certificateNumber}, Second: ${dataB.certificateNumber}`, Date.now() - t24);
+
+    // Clean up test certificate immediately so test suite does not pollute registry
+    if (dataA && dataA.id) {
+      try {
+        const certFile = path.join(__dirname, '..', 'data', 'certificates.json');
+        if (fs.existsSync(certFile)) {
+          const raw = JSON.parse(fs.readFileSync(certFile, 'utf8'));
+          const filtered = raw.filter((c) => c.id !== dataA.id);
+          fs.writeFileSync(certFile, JSON.stringify(filtered, null, 2));
+        }
+      } catch {}
+    }
   } catch (e) {
     recordTest(24, 'Double-click prevention test', false, e.message, Date.now() - t24);
   }

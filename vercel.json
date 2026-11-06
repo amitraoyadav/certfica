@@ -2,6 +2,12 @@
   "version": 2,
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
+  "crons": [
+    {
+      "path": "/api/cron/daily-backup",
+      "schedule": "0 2 * * *"
+    }
+  ],
   "functions": {
     "api/**/*.ts": {
       "includeFiles": "{data/**,src/data/**,firebase-applet-config.json,api/**}"

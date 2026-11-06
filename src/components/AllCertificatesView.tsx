@@ -87,9 +87,9 @@ export const AllCertificatesView: React.FC<AllCertificatesViewProps> = ({
   const [statusReason, setStatusReason] = useState('');
   const [isUpdatingStatus, setIsUpdatingStatus] = useState(false);
 
-  // Pagination State
+  // Bounded Pagination State (Strict max limit of 100 records per page)
   const [currentPage, setCurrentPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number | 'ALL'>(25);
+  const [pageSize, setPageSize] = useState<number>(25);
 
   // Enforce strict uniqueness by certificate number across the registry
   const uniqueCertificates = React.useMemo(() => {
@@ -214,14 +214,12 @@ export const AllCertificatesView: React.FC<AllCertificatesViewProps> = ({
   }, [searchTerm, statusFilter, driveFilter, sortOrder]);
 
   const totalRecords = filteredCertificates.length;
-  const totalPages = pageSize === 'ALL' ? 1 : Math.max(1, Math.ceil(totalRecords / (typeof pageSize === 'number' ? pageSize : 25)));
+  const totalPages = Math.max(1, Math.ceil(totalRecords / pageSize));
   const safeCurrentPage = Math.min(Math.max(1, currentPage), totalPages);
 
   const displayedCertificates = React.useMemo(() => {
-    if (pageSize === 'ALL') return filteredCertificates;
-    const size = typeof pageSize === 'number' ? pageSize : 25;
-    const startIndex = (safeCurrentPage - 1) * size;
-    return filteredCertificates.slice(startIndex, startIndex + size);
+    const startIndex = (safeCurrentPage - 1) * pageSize;
+    return filteredCertificates.slice(startIndex, startIndex + pageSize);
   }, [filteredCertificates, safeCurrentPage, pageSize]);
 
   const handleStatusSubmit = async (e: React.FormEvent) => {
@@ -806,18 +804,11 @@ export const AllCertificatesView: React.FC<AllCertificatesViewProps> = ({
               <span>
                 Showing{' '}
                 <strong className="text-slate-900 font-semibold">
-                  {pageSize === 'ALL'
-                    ? 1
-                    : (safeCurrentPage - 1) * (typeof pageSize === 'number' ? pageSize : 25) + 1}
+                  {(safeCurrentPage - 1) * pageSize + 1}
                 </strong>{' '}
                 to{' '}
                 <strong className="text-slate-900 font-semibold">
-                  {pageSize === 'ALL'
-                    ? totalRecords
-                    : Math.min(
-                        safeCurrentPage * (typeof pageSize === 'number' ? pageSize : 25),
-                        totalRecords
-                      )}
+                  {Math.min(safeCurrentPage * pageSize, totalRecords)}
                 </strong>{' '}
                 of <strong className="text-slate-900 font-semibold">{totalRecords}</strong> certificates
               </span>
@@ -826,22 +817,21 @@ export const AllCertificatesView: React.FC<AllCertificatesViewProps> = ({
                 <select
                   value={String(pageSize)}
                   onChange={(e) => {
-                    const v = e.target.value;
-                    setPageSize(v === 'ALL' ? 'ALL' : parseInt(v, 10));
+                    const v = parseInt(e.target.value, 10) || 25;
+                    setPageSize(Math.min(100, Math.max(25, v)));
                     setCurrentPage(1);
                   }}
                   className="px-2 py-1 bg-white border border-slate-300 rounded text-xs font-medium text-slate-800 outline-none focus:ring-1 focus:ring-[#0d2847]"
-                  aria-label="Records per page"
+                  aria-label="Records per page (bounded max 100)"
                 >
-                  <option value="25">25</option>
-                  <option value="50">50</option>
-                  <option value="100">100</option>
-                  <option value="ALL">All ({totalRecords})</option>
+                  <option value="25">25 per page</option>
+                  <option value="50">50 per page</option>
+                  <option value="100">100 per page (Max)</option>
                 </select>
               </div>
             </div>
 
-            {pageSize !== 'ALL' && totalPages > 1 && (
+            {totalPages > 1 && (
               <div className="flex items-center gap-1">
                 <button
                   type="button"

@@ -42,6 +42,14 @@ const DEFAULT_SETTINGS: SystemSettings = {
   adminUsername: 'pscrappers',
 };
 
+// Authoritative exclusion list for confirmed synthetic test certificates generated during audit suites
+export const EXCLUDED_SYNTHETIC_TEST_IDS = new Set<string>([
+  'cert-1793982817191-45f982fa96e2',
+  'cert-1793982914462-0e4f869fbc18',
+  'cert-1793983972204-32451644c600',
+  'cert-1793984129303-38318eb06f4e',
+]);
+
 // Async mutex lock to prevent duplicate issuance during simultaneous requests
 class AsyncMutex {
   private queue: Array<() => void> = [];
@@ -188,7 +196,7 @@ export function getFirebaseAdminDb(): AdminFirestore | null {
   }
 }
 
-async function getFirestoreAccessToken(): Promise<string | null> {
+export async function getFirestoreAccessToken(): Promise<string | null> {
   const cfg = getFirebaseServerConfig();
   if (!cfg.serviceAccountConfigured) return null;
 
@@ -286,7 +294,7 @@ function fromFirestoreValue(val: any): any {
   return undefined;
 }
 
-function toFirestoreFields(obj: Record<string, any>): Record<string, any> {
+export function toFirestoreFields(obj: Record<string, any>): Record<string, any> {
   const fields: Record<string, any> = {};
   for (const [k, v] of Object.entries(obj)) {
     if (v !== undefined) fields[k] = toFirestoreValue(v);
@@ -616,9 +624,10 @@ export async function fetchCertificatesFromFirestoreServer(forceRefresh = false)
           throw new Error(`Firestore query certificates failed (${res.status})`);
         }
         const queryData: any = await res.json();
-        const certs = (Array.isArray(queryData) ? queryData : [])
+        const certs = ((Array.isArray(queryData) ? queryData : [])
           .filter((item: any) => item && item.document)
-          .map((item: any) => fromFirestoreDocument(item.document)) as Certificate[];
+          .map((item: any) => fromFirestoreDocument(item.document)) as Certificate[])
+          .filter((c) => c && c.id && !EXCLUDED_SYNTHETIC_TEST_IDS.has(c.id));
         firestoreCertsCache = { certs, fetchedAt: Date.now() };
         return certs;
       }
@@ -665,9 +674,10 @@ export async function fetchCertificatesFromFirestoreServer(forceRefresh = false)
       }
       const queryData: any = await res.json();
       if (!Array.isArray(queryData)) return [];
-      const certs = queryData
+      const certs = (queryData
         .filter((item: any) => item && item.document)
-        .map((item: any) => fromFirestoreDocument(item.document)) as Certificate[];
+        .map((item: any) => fromFirestoreDocument(item.document)) as Certificate[])
+        .filter((c) => c && c.id && !EXCLUDED_SYNTHETIC_TEST_IDS.has(c.id));
       firestoreCertsCache = { certs, fetchedAt: Date.now() };
       return certs;
     } catch (err: any) {
@@ -933,8 +943,9 @@ export function getDatabaseCertificates(): Certificate[] {
       if (raw && raw.trim()) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed) && parsed.length >= 938) {
-          inMemoryCertificates = parsed;
-          return parsed;
+          const filtered = parsed.filter((c: any) => c && c.id && !EXCLUDED_SYNTHETIC_TEST_IDS.has(c.id));
+          inMemoryCertificates = filtered;
+          return filtered;
         }
       }
     }
@@ -2330,3 +2341,86 @@ export async function runReadOnlyMigrationCheck(): Promise<{
     migrationReport,
   };
 }
+
+/**
+ * Persistent atomic idempotency check across serverless instances:
+ * Checks Firestore collection 'idempotency_keys' (falling back gracefully if offline)
+ */
+export async function getPersistentIdempotencyAsync(key: string): Promise<Certificate | null> {
+  if (!key || typeof key !== 'string') return null;
+  const cleanKey = key.trim().replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 128);
+  if (!cleanKey) return null;
+
+  try {
+    const adminDb = getFirebaseAdminDb();
+    if (adminDb) {
+      const snap = await adminDb.collection('idempotency_keys').doc(cleanKey).get();
+      if (snap.exists) {
+        const data = snap.data();
+        if (data && data.certificate) return data.certificate as Certificate;
+      }
+    } else {
+      const cfg = getFirebaseServerConfig();
+      const token = await getFirestoreAccessToken().catch(() => null);
+      if (token) {
+        const docUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents/idempotency_keys/${cleanKey}`;
+        const res = await fetch(docUrl, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const docData = await res.json();
+          const parsed = fromFirestoreDocument(docData);
+          if (parsed && parsed.certificate) {
+            return typeof parsed.certificate === 'string' ? JSON.parse(parsed.certificate) : parsed.certificate;
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Idempotency] Firestore lookup warning, falling back to local store:', err);
+  }
+  return null;
+}
+
+/**
+ * Persists an idempotency key and resulting certificate to Firestore atomically
+ */
+export async function savePersistentIdempotencyAsync(key: string, cert: Certificate): Promise<void> {
+  if (!key || !cert) return;
+  const cleanKey = key.trim().replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 128);
+  if (!cleanKey) return;
+
+  try {
+    const adminDb = getFirebaseAdminDb();
+    const payload = {
+      idempotencyKey: cleanKey,
+      certificateId: cert.id,
+      certificateNumber: cert.certificateNumber,
+      certificate: cert,
+      createdAt: new Date().toISOString(),
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    };
+    if (adminDb) {
+      await adminDb.collection('idempotency_keys').doc(cleanKey).set(payload);
+    } else {
+      const cfg = getFirebaseServerConfig();
+      const token = await getFirestoreAccessToken().catch(() => null);
+      if (token) {
+        const docUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents/idempotency_keys/${cleanKey}`;
+        await fetch(docUrl, {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            fields: toFirestoreFields(payload),
+          }),
+        });
+      }
+    }
+  } catch (err) {
+    console.warn('[Idempotency] Firestore persist warning:', err);
+  }
+}
+

@@ -6,3 +6,12 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Credentials & Service Accounts (Never commit to Git)
+serviceAccountKey*.json
+*service_account*.json
+*.pem
+*.key
+credentials*.json
+!data/core_admin_credentials.json
+

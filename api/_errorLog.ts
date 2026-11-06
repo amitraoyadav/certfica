@@ -92,7 +92,35 @@ export function recordSystemError(
     inMemoryErrorLogs.pop();
   }
 
-  // Persist to file if storage is writable
+  // 1. Asynchronously persist to persistent Firestore collection system_errors (works on Vercel serverless)
+  import('./_db.js')
+    .then(async (dbMod) => {
+      try {
+        const adminDb = dbMod.getFirebaseAdminDb();
+        if (adminDb) {
+          await adminDb.collection('system_errors').doc(entry.id).set(entry);
+        } else {
+          const cfg = dbMod.getFirebaseServerConfig();
+          const token = await dbMod.getFirestoreAccessToken().catch(() => null);
+          if (token) {
+            const docUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents/system_errors/${entry.id}`;
+            await fetch(docUrl, {
+              method: 'PATCH',
+              headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                fields: dbMod.toFirestoreFields(entry),
+              }),
+            });
+          }
+        }
+      } catch {}
+    })
+    .catch(() => {});
+
+  // 2. Persist to local disk if storage is writable (development fallback)
   try {
     const errorFile = path.join(process.cwd(), 'data', 'error_logs.json');
     fs.writeFileSync(errorFile, JSON.stringify(inMemoryErrorLogs.slice(0, 100), null, 2), 'utf-8');
