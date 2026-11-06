@@ -467,7 +467,18 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
             isLocked: true,
             isImmutable: true,
             location: 'Delhi NCR',
+            qrToken: `tok_${Date.now()}`,
+            verificationUrl: `/verify?certificateNumber=${encodeURIComponent(duplicateCert.certificateNumber)}`,
+            companySnapshot: {
+              companyName: 'PARIVAHAN SCRAPPERS',
+              companySubtitle: 'A Unit OF Scrapping Yard Ltd.',
+              address: 'B12, Dwarka, New Delhi.',
+              phone: '8506925495',
+              website: 'https://parivahan-scrappers.netlify.app/',
+              signatoryTitle: 'Authorised Signatory',
+            },
             createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
           });
         });
     } else if (onViewExistingCertificate) {

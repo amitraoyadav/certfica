@@ -348,7 +348,9 @@ export const AuditReportModal: React.FC<AuditReportModalProps> = ({
                       <td className="py-2.5 px-3 font-mono font-bold text-[#0d2847]">
                         <div className="flex items-center gap-1.5">
                           <span>{item.certificateNumber}</span>
-                          <Lock className="w-3 h-3 text-emerald-600 shrink-0" title="Locked & Protected" />
+                          <span title="Locked & Protected">
+                            <Lock className="w-3 h-3 text-emerald-600 shrink-0" />
+                          </span>
                         </div>
                         <span className="text-[10px] text-slate-400 block font-normal truncate max-w-[120px]">
                           ID: {item.id}

@@ -13,6 +13,7 @@ import { ImportOldCertificatesModal } from './components/ImportOldCertificatesMo
 import { RestoreBackupModal } from './components/RestoreBackupModal';
 import { DataIntegrityModal } from './components/DataIntegrityModal';
 import { DirectPdfScannerModal } from './components/DirectPdfScannerModal';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import type { Certificate, CertificateStatus, DashboardStats } from './types';
 import { ArrowLeft, Printer, ShieldCheck, RefreshCw, CheckCircle2, FolderUp, Cloud, Lock } from 'lucide-react';
 import {
@@ -116,7 +117,8 @@ export default function App() {
       }
 
       // 2. Check if MAIN_CORE_ADMIN session is unlocked on server
-      let coreAdminActive = isMainAdmin;
+      const hasCoreSession = Boolean(sessionStorage.getItem('ps_core_admin_token'));
+      let coreAdminActive = isMainAdmin || hasCoreSession;
       if (forceCoreAdminCheck) {
         try {
           const statusRes = await fetch('/api/auth/main-admin-status', {
@@ -125,18 +127,18 @@ export default function App() {
           });
           if (statusRes.ok) {
             const statusData = await statusRes.json();
-            coreAdminActive = Boolean(statusData.authenticated && statusData.role === 'MAIN_CORE_ADMIN');
-            setIsMainAdmin(coreAdminActive);
-            if (!coreAdminActive) {
+            const verified = Boolean(
+              (statusData.authenticated || statusData.isMainAdmin) &&
+              statusData.role === 'MAIN_CORE_ADMIN'
+            );
+            coreAdminActive = verified;
+            setIsMainAdmin(verified);
+            if (!verified) {
               sessionStorage.removeItem('ps_core_admin_token');
             }
-          } else {
-            coreAdminActive = false;
-            setIsMainAdmin(false);
           }
         } catch {
-          coreAdminActive = false;
-          setIsMainAdmin(false);
+          coreAdminActive = hasCoreSession;
         }
       }
 
@@ -251,6 +253,9 @@ export default function App() {
       if (storedToken && !hasExplicitlyLoggedOut) {
         setIsAdmin(true);
         const hasCoreToken = Boolean(sessionStorage.getItem('ps_core_admin_token'));
+        if (hasCoreToken) {
+          setIsMainAdmin(true);
+        }
         if (hasCoreToken && pathname.startsWith('/certificates')) {
           setActiveTab('certificates');
         } else if (hasCoreToken && pathname.startsWith('/dashboard')) {
@@ -374,9 +379,9 @@ export default function App() {
       setIsMainAdmin(true);
       setMainAdminPasswordInput('');
       setMainAdminModalOpen(false);
-      await fetchData(false, false);
       setActiveTab('dashboard');
       window.history.pushState({}, '', '/dashboard');
+      await fetchData(false, false);
     } catch (err: any) {
       setMainAdminError(err.message || 'Invalid Main Core Admin password.');
     } finally {
@@ -556,7 +561,7 @@ export default function App() {
           ? {
               ...prev,
               totalCertificates: prev.totalCertificates + 1,
-              validCertificates: prev.validCertificates + 1,
+              validCount: (prev.validCount || 0) + 1,
             }
           : null
       );
@@ -772,34 +777,38 @@ export default function App() {
 
         {/* TAB 2: ALL CERTIFICATES - MAIN CORE ADMIN ONLY */}
         {isAdmin && isMainAdmin && activeTab === 'certificates' && (
-          <AllCertificatesView
-            certificates={certificates}
-            onViewCertificate={handleViewCertificate}
-            onUpdateStatus={handleUpdateStatus}
-            onUpdateCertificate={handleUpdateCertificate}
-            onNavigateToCreate={() => handleSelectTab('create')}
-            onRefreshData={fetchData}
-            onOpenImport={() => setImportOldModalOpen(true)}
-            onOpenRestore={() => setRestoreModalOpen(true)}
-            onOpenIntegrityCheck={() => setIntegrityModalOpen(true)}
-          />
+          <ErrorBoundary fallbackTitle="Certificates Registry Recovery">
+            <AllCertificatesView
+              certificates={certificates}
+              onViewCertificate={handleViewCertificate}
+              onUpdateStatus={handleUpdateStatus}
+              onUpdateCertificate={handleUpdateCertificate}
+              onNavigateToCreate={() => handleSelectTab('create')}
+              onRefreshData={fetchData}
+              onOpenImport={() => setImportOldModalOpen(true)}
+              onOpenRestore={() => setRestoreModalOpen(true)}
+              onOpenIntegrityCheck={() => setIntegrityModalOpen(true)}
+            />
+          </ErrorBoundary>
         )}
 
         {/* TAB 3: DASHBOARD - MAIN CORE ADMIN ONLY */}
         {isAdmin && isMainAdmin && activeTab === 'dashboard' && (
-          <DashboardView
-            stats={stats}
-            recentCertificates={certificates}
-            onNavigate={handleSelectTab}
-            onViewCertificate={handleViewCertificate}
-            onOpenImport={() => setImportOldModalOpen(true)}
-            onOpenRestore={() => setRestoreModalOpen(true)}
-            onOpenIntegrityCheck={() => setIntegrityModalOpen(true)}
-            onRefreshData={fetchData}
-            isMainAdmin={isMainAdmin}
-            onLogoutMainAdmin={handleLogoutMainAdmin}
-            onMainAdminPasswordChanged={handleLogoutMainAdmin}
-          />
+          <ErrorBoundary fallbackTitle="Main Core Admin Dashboard Recovery">
+            <DashboardView
+              stats={stats}
+              recentCertificates={certificates}
+              onNavigate={handleSelectTab}
+              onViewCertificate={handleViewCertificate}
+              onOpenImport={() => setImportOldModalOpen(true)}
+              onOpenRestore={() => setRestoreModalOpen(true)}
+              onOpenIntegrityCheck={() => setIntegrityModalOpen(true)}
+              onRefreshData={fetchData}
+              isMainAdmin={isMainAdmin}
+              onLogoutMainAdmin={handleLogoutMainAdmin}
+              onMainAdminPasswordChanged={handleLogoutMainAdmin}
+            />
+          </ErrorBoundary>
         )}
 
         {/* TAB 4: VIEW CERTIFICATE */}

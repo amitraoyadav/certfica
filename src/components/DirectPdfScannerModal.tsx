@@ -35,6 +35,9 @@ interface ScanResult {
   message: string;
   matchedCertificate?: Certificate;
   extractedFields?: any;
+  certificateNumber?: string;
+  ownerName?: string;
+  vehicleRegistrationNumber?: string;
 }
 
 export const DirectPdfScannerModal: React.FC<DirectPdfScannerModalProps> = ({

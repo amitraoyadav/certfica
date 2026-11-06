@@ -2701,5 +2701,27 @@
     "details": "Official certificate PS/26/R1000 verified and authenticated with 100% SHA-256 integrity match.",
     "ip": "127.0.0.1",
     "userAgent": "Unknown"
+  },
+  {
+    "id": "audit-1793911294176-62a29a0d",
+    "timestamp": "2026-11-05T20:41:34.176Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin privileges unlocked successfully.",
+    "ip": "127.0.0.1",
+    "userAgent": "node-fetch"
+  },
+  {
+    "id": "audit-1793911340533-719ae0e7",
+    "timestamp": "2026-11-05T20:42:20.533Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin privileges unlocked successfully.",
+    "ip": "127.0.0.1",
+    "userAgent": "node-fetch"
   }
 ]

@@ -121,7 +121,7 @@ export const FrontPageLogin: React.FC<FrontPageLoginProps> = ({
       {/* Brand Header */}
       <div className="text-center mb-6">
         <div className="inline-flex items-center justify-center mb-3">
-          <PScrapLogo size="lg" variant="navy" />
+          <PScrapLogo size="lg" variant="dark" />
         </div>
         <h1 className="text-2xl sm:text-3xl font-black font-serif text-[#0d2847] tracking-tight">
           PARIVAHAN SCRAPPERS

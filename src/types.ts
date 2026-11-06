@@ -298,6 +298,7 @@ export interface MigrationCenterStats {
   failedRecords: number;
   lastSuccessfulBackup: string;
   lastSuccessfulSync: string;
+  lastSuccessfulSynchronisation?: string;
   manifest?: MigrationManifest;
   integrityReport?: any;
   exportFiles?: Array<{ name: string; size: number; sha256: string; recordCount: number }>;

@@ -52,7 +52,7 @@ interface AllCertificatesViewProps {
 }
 
 export const AllCertificatesView: React.FC<AllCertificatesViewProps> = ({
-  certificates,
+  certificates = [],
   onViewCertificate,
   onUpdateStatus,
   onUpdateCertificate,
@@ -87,7 +87,8 @@ export const AllCertificatesView: React.FC<AllCertificatesViewProps> = ({
   // Enforce strict uniqueness by certificate number across the registry
   const uniqueCertificates = React.useMemo(() => {
     const map = new Map<string, Certificate>();
-    for (const cert of certificates) {
+    const safeList = Array.isArray(certificates) ? certificates : [];
+    for (const cert of safeList) {
       if (!cert || !cert.certificateNumber) continue;
       const key = cert.certificateNumber.trim().toUpperCase();
       if (!map.has(key)) {
@@ -652,7 +653,9 @@ export const AllCertificatesView: React.FC<AllCertificatesViewProps> = ({
                     <td className="py-3.5 px-4 font-mono font-bold text-[#0d2847]">
                       <div className="flex items-center gap-1.5">
                         <span>{cert.certificateNumber}</span>
-                        <Lock className="w-3.5 h-3.5 text-emerald-600 shrink-0" title="Locked & Protected: Issued certificate cannot be modified." />
+                        <span title="Locked & Protected: Issued certificate cannot be modified.">
+                          <Lock className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        </span>
                       </div>
                     </td>
                     <td className="py-3.5 px-4 font-mono text-slate-700 font-medium">

@@ -46,7 +46,7 @@ interface DashboardViewProps {
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
   stats,
-  recentCertificates,
+  recentCertificates = [],
   onNavigate,
   onViewCertificate,
   onOpenImport,
@@ -247,10 +247,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     }
   };
 
-  const totalCerts = stats ? stats.totalCertificates : recentCertificates.length;
+  const safeCertificates = Array.isArray(recentCertificates) ? recentCertificates : [];
+  const totalCerts = stats ? stats.totalCertificates : safeCertificates.length;
   const latestCertNo = stats
     ? stats.latestCertificateNumber
-    : recentCertificates[0]?.certificateNumber || 'PS/26/R1000';
+    : safeCertificates[0]?.certificateNumber || 'PS/26/R1000';
 
   return (
     <div className="space-y-6">
@@ -606,17 +607,19 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-slate-800">
-              {recentCertificates.length === 0 ? (
+              {safeCertificates.length === 0 ? (
                 <tr>
                   <td colSpan={8} className="py-8 text-center text-slate-400">
                     No certificates recorded yet. Click "CREATE CERTIFICATE" to begin.
                   </td>
                 </tr>
               ) : (
-                recentCertificates.slice(0, 5).map((cert) => (
-                  <tr key={cert.id} className="hover:bg-slate-50/80 transition-colors">
+                safeCertificates.slice(0, 5).map((cert) => {
+                  if (!cert) return null;
+                  return (
+                  <tr key={cert.id || cert.certificateNumber} className="hover:bg-slate-50/80 transition-colors">
                     <td className="py-3 px-4 font-mono font-bold text-[#0d2847]">
-                      {cert.certificateNumber}
+                      {cert.certificateNumber || 'N/A'}
                     </td>
                     <td className="py-3 px-4 font-mono text-slate-700 font-medium">
                       {cert.scrappingRegistrationNumber}
@@ -678,7 +681,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                       </div>
                     </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>
