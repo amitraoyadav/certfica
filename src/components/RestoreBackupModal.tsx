@@ -16,6 +16,7 @@ import {
 import type { DatabaseBackupInfo } from '../types';
 import { getDriveAccessToken, isDriveConnected } from '../services/googleDriveAuth';
 import { getOrCreateDriveFolderHierarchy } from '../services/googleDriveService';
+import { getAuthHeaders } from '../config/apiConfig';
 
 interface RestoreBackupModalProps {
   isOpen: boolean;
@@ -48,7 +49,10 @@ export const RestoreBackupModal: React.FC<RestoreBackupModalProps> = ({
     setIsLoadingBackups(true);
     setErrorMessage(null);
     try {
-      const res = await fetch('/api/backups');
+      const res = await fetch('/api/backups', {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
       if (res.ok) {
         const data = await res.json();
         setBackups(data.backups || []);
@@ -103,11 +107,6 @@ export const RestoreBackupModal: React.FC<RestoreBackupModalProps> = ({
     setRestoreReport(null);
 
     try {
-      const token =
-        localStorage.getItem('ps_admin_token') ||
-        localStorage.getItem('pscrappers_admin_token') ||
-        'ps_admin_session_token_secure_2026';
-
       const bodyPayload = uploadedJsonContent
         ? { jsonContent: uploadedJsonContent }
         : { filename: selectedBackupFilename };
@@ -116,8 +115,9 @@ export const RestoreBackupModal: React.FC<RestoreBackupModalProps> = ({
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
+          ...getAuthHeaders(),
         },
+        credentials: 'include',
         body: JSON.stringify(bodyPayload),
       });
 

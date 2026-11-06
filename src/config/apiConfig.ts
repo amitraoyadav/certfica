@@ -17,3 +17,24 @@ export function getApiUrl(endpoint: string): string {
   const clean = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
   return `${API_BASE_URL}${clean}`;
 }
+
+/**
+ * Returns authentication headers including Certificate Maker token and Main Core Admin session token.
+ */
+export function getAuthHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (typeof window === 'undefined') return headers;
+  const coreToken = sessionStorage.getItem('ps_core_admin_token') || '';
+  const adminToken =
+    localStorage.getItem('ps_admin_token') ||
+    localStorage.getItem('pscrappers_admin_token') ||
+    '';
+  if (adminToken) {
+    headers['x-admin-token'] = adminToken;
+    headers['Authorization'] = `Bearer ${adminToken}`;
+  }
+  if (coreToken) {
+    headers['x-main-admin-token'] = coreToken;
+  }
+  return headers;
+}

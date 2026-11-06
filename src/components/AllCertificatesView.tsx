@@ -11,6 +11,9 @@ import {
   ArrowUpDown,
   Car,
   ChevronRight,
+  ChevronLeft,
+  ChevronsLeft,
+  ChevronsRight,
   AlertCircle,
   Database,
   RefreshCw,
@@ -83,6 +86,10 @@ export const AllCertificatesView: React.FC<AllCertificatesViewProps> = ({
   const [newStatus, setNewStatus] = useState<CertificateStatus>('REVOKED');
   const [statusReason, setStatusReason] = useState('');
   const [isUpdatingStatus, setIsUpdatingStatus] = useState(false);
+
+  // Pagination State
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number | 'ALL'>(25);
 
   // Enforce strict uniqueness by certificate number across the registry
   const uniqueCertificates = React.useMemo(() => {
@@ -200,6 +207,22 @@ export const AllCertificatesView: React.FC<AllCertificatesViewProps> = ({
       const timeB = new Date(b.createdAt).getTime();
       return sortOrder === 'newest' ? timeB - timeA : timeA - timeB;
     });
+
+  // Reset to page 1 whenever search or filters change
+  React.useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm, statusFilter, driveFilter, sortOrder]);
+
+  const totalRecords = filteredCertificates.length;
+  const totalPages = pageSize === 'ALL' ? 1 : Math.max(1, Math.ceil(totalRecords / (typeof pageSize === 'number' ? pageSize : 25)));
+  const safeCurrentPage = Math.min(Math.max(1, currentPage), totalPages);
+
+  const displayedCertificates = React.useMemo(() => {
+    if (pageSize === 'ALL') return filteredCertificates;
+    const size = typeof pageSize === 'number' ? pageSize : 25;
+    const startIndex = (safeCurrentPage - 1) * size;
+    return filteredCertificates.slice(startIndex, startIndex + size);
+  }, [filteredCertificates, safeCurrentPage, pageSize]);
 
   const handleStatusSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -493,7 +516,7 @@ export const AllCertificatesView: React.FC<AllCertificatesViewProps> = ({
             </button>
           </div>
         ) : (
-          filteredCertificates.map((cert) => (
+          displayedCertificates.map((cert) => (
             <div
               key={`mobile-${cert.id}`}
               className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs space-y-3"
@@ -648,7 +671,7 @@ export const AllCertificatesView: React.FC<AllCertificatesViewProps> = ({
                   </td>
                 </tr>
               ) : (
-                filteredCertificates.map((cert) => (
+                displayedCertificates.map((cert) => (
                   <tr key={cert.id} className="hover:bg-slate-50/80 transition-colors">
                     <td className="py-3.5 px-4 font-mono font-bold text-[#0d2847]">
                       <div className="flex items-center gap-1.5">
@@ -775,7 +798,134 @@ export const AllCertificatesView: React.FC<AllCertificatesViewProps> = ({
             </tbody>
           </table>
         </div>
+
+        {/* Pagination Controls Bar */}
+        {totalRecords > 0 && (
+          <div className="bg-slate-50 border-t border-slate-200 px-4 py-3 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs sm:text-sm text-slate-700">
+            <div className="flex items-center gap-3 w-full sm:w-auto justify-between sm:justify-start">
+              <span>
+                Showing{' '}
+                <strong className="text-slate-900 font-semibold">
+                  {pageSize === 'ALL'
+                    ? 1
+                    : (safeCurrentPage - 1) * (typeof pageSize === 'number' ? pageSize : 25) + 1}
+                </strong>{' '}
+                to{' '}
+                <strong className="text-slate-900 font-semibold">
+                  {pageSize === 'ALL'
+                    ? totalRecords
+                    : Math.min(
+                        safeCurrentPage * (typeof pageSize === 'number' ? pageSize : 25),
+                        totalRecords
+                      )}
+                </strong>{' '}
+                of <strong className="text-slate-900 font-semibold">{totalRecords}</strong> certificates
+              </span>
+              <div className="flex items-center gap-1.5 ml-2">
+                <span className="text-xs text-slate-500 hidden md:inline">Per page:</span>
+                <select
+                  value={String(pageSize)}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setPageSize(v === 'ALL' ? 'ALL' : parseInt(v, 10));
+                    setCurrentPage(1);
+                  }}
+                  className="px-2 py-1 bg-white border border-slate-300 rounded text-xs font-medium text-slate-800 outline-none focus:ring-1 focus:ring-[#0d2847]"
+                  aria-label="Records per page"
+                >
+                  <option value="25">25</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                  <option value="ALL">All ({totalRecords})</option>
+                </select>
+              </div>
+            </div>
+
+            {pageSize !== 'ALL' && totalPages > 1 && (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage(1)}
+                  disabled={safeCurrentPage === 1}
+                  className="p-1.5 rounded hover:bg-slate-200 disabled:opacity-30 disabled:cursor-not-allowed text-slate-700 cursor-pointer"
+                  title="First Page"
+                >
+                  <ChevronsLeft className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                  disabled={safeCurrentPage === 1}
+                  className="px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed font-medium text-xs flex items-center gap-1 text-slate-700 cursor-pointer"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                  <span>Prev</span>
+                </button>
+
+                <div className="hidden sm:flex items-center gap-1 px-1">
+                  {Array.from({ length: totalPages }, (_, i) => i + 1)
+                    .filter((page) => {
+                      if (totalPages <= 7) return true;
+                      if (page === 1 || page === totalPages) return true;
+                      return Math.abs(page - safeCurrentPage) <= 2;
+                    })
+                    .reduce<Array<number | string>>((acc, page, idx, arr) => {
+                      if (idx > 0 && typeof arr[idx - 1] === 'number' && (page as number) - (arr[idx - 1] as number) > 1) {
+                        acc.push('...');
+                      }
+                      acc.push(page);
+                      return acc;
+                    }, [])
+                    .map((item, idx) =>
+                      typeof item === 'string' ? (
+                        <span key={`ellipsis-${idx}`} className="px-1 text-slate-400">
+                          ...
+                        </span>
+                      ) : (
+                        <button
+                          key={`page-${item}`}
+                          type="button"
+                          onClick={() => setCurrentPage(item)}
+                          className={`min-w-7 h-7 px-2 rounded text-xs font-semibold cursor-pointer transition-colors ${
+                            item === safeCurrentPage
+                              ? 'bg-[#0d2847] text-white'
+                              : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-100'
+                          }`}
+                        >
+                          {item}
+                        </button>
+                      )
+                    )}
+                </div>
+
+                <span className="sm:hidden text-xs font-semibold px-2">
+                  Page {safeCurrentPage} of {totalPages}
+                </span>
+
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={safeCurrentPage === totalPages}
+                  className="px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed font-medium text-xs flex items-center gap-1 text-slate-700 cursor-pointer"
+                >
+                  <span>Next</span>
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage(totalPages)}
+                  disabled={safeCurrentPage === totalPages}
+                  className="p-1.5 rounded hover:bg-slate-200 disabled:opacity-30 disabled:cursor-not-allowed text-slate-700 cursor-pointer"
+                  title="Last Page"
+                >
+                  <ChevronsRight className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
+
 
       {/* Status Change Modal */}
       {statusModalCert && (

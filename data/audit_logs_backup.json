@@ -2723,5 +2723,95 @@
     "details": "Main Core Admin privileges unlocked successfully.",
     "ip": "127.0.0.1",
     "userAgent": "node-fetch"
+  },
+  {
+    "id": "audit-1793981775968-55eac759",
+    "timestamp": "2026-11-06T16:16:15.968Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin privileges unlocked successfully.",
+    "ip": "2409:4090:8083:be06:b94b:cd6:9c30:a62, 169.254.169.126",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
+  },
+  {
+    "id": "audit-1793981825343-a8191a45",
+    "timestamp": "2026-11-06T16:17:05.343Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin privileges unlocked successfully.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793982816916-d09f44af",
+    "timestamp": "2026-11-06T16:33:36.916Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin privileges unlocked successfully.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793982817132-98097af4",
+    "timestamp": "2026-11-06T16:33:37.132Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_FAILED",
+    "actor": "user",
+    "details": "Failed Main Core Admin elevation attempt with incorrect password.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793982818199-819cba20",
+    "timestamp": "2026-11-06T16:33:38.199Z",
+    "certificateId": "cert-1793981234217-21987ccfac7b",
+    "certificateNumber": "PS/26/R4170606",
+    "action": "CERTIFICATE_VERIFIED",
+    "actor": "public-verifier",
+    "dataHash": "27f381ef19f41bf1fa02976bf3ea8bb92077ebd349a7c153c359d651e6425b71",
+    "details": "Official certificate PS/26/R4170606 verified and authenticated with 100% SHA-256 integrity match.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793982914257-0877af1c",
+    "timestamp": "2026-11-06T16:35:14.257Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin privileges unlocked successfully.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793982914414-4d7f51c9",
+    "timestamp": "2026-11-06T16:35:14.414Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_FAILED",
+    "actor": "user",
+    "details": "Failed Main Core Admin elevation attempt with incorrect password.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793982914781-347c3e14",
+    "timestamp": "2026-11-06T16:35:14.781Z",
+    "certificateId": "cert-1793982817191-45f982fa96e2",
+    "certificateNumber": "PS/26/R9995688",
+    "action": "CERTIFICATE_VERIFIED",
+    "actor": "public-verifier",
+    "dataHash": "cf1f007ffeb4711fb3ddc69cec902567e034f99cf6198e3979c3a383f9f85de5",
+    "details": "Official certificate PS/26/R9995688 verified and authenticated with 100% SHA-256 integrity match.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
   }
 ]

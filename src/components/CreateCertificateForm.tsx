@@ -23,7 +23,7 @@ import {
 } from 'lucide-react';
 import type { Certificate } from '../types';
 import { maskChassisNumber, maskEngineNumber } from '../utils/maskUtils';
-import { getApiUrl } from '../config/apiConfig';
+import { getApiUrl, getAuthHeaders } from '../config/apiConfig';
 
 interface CreateCertificateFormProps {
   onCertificateCreated: (cert: Certificate) => void;
@@ -333,10 +333,12 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
   const handleConfirmGenerate = async () => {
     if (isSubmitting) return;
     setIsSubmitting(true);
-    setErrorMessage(null);
+    const idempotencyKey = `req_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
     const safePayload = {
       ...formData,
+      clientRequestId: idempotencyKey,
+      idempotencyKey,
       ownerName: formData.ownerName.trim(),
       idProofNumber: includeIdProof && (formData.idProofNumber || '').trim()
         ? formData.idProofNumber.trim()
@@ -371,11 +373,6 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
     };
 
     try {
-      const adminToken =
-        localStorage.getItem('ps_admin_token') ||
-        localStorage.getItem('pscrappers_admin_token') ||
-        '';
-
       let res: Response | null = null;
       let retries = 0;
       const maxRetries = 2;
@@ -383,11 +380,10 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
       while (retries <= maxRetries) {
         const headers: Record<string, string> = {
           'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+          'x-idempotency-key': idempotencyKey,
+          ...getAuthHeaders(),
         };
-        if (adminToken) {
-          headers.Authorization = `Bearer ${adminToken}`;
-          headers['x-admin-token'] = adminToken;
-        }
         res = await fetch(getApiUrl('/api/certificates'), {
           method: 'POST',
           headers,

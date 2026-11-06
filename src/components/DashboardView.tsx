@@ -28,6 +28,7 @@ import { isDriveConnected, googleDriveSignIn, auth } from '../services/googleDri
 import { syncAllCertificatesFromGoogleDrive } from '../services/googleDriveService';
 import { GoogleDriveSyncSection } from './GoogleDriveSyncSection';
 import { FullDatabaseSyncMigrationCentre } from './FullDatabaseSyncMigrationCentre';
+import { PlatformHealthSection } from './PlatformHealthSection';
 
 interface DashboardViewProps {
   stats: DashboardStats | null;
@@ -556,6 +557,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </p>
         </div>
       </div>
+
+      {/* PLATFORM HEALTH, DATABASE STORAGE & DISASTER RECOVERY */}
+      <PlatformHealthSection isMainAdmin={isMainAdmin} />
 
       {/* FULL DATABASE SYNC & MIGRATION CENTRE (Section 6) */}
       <FullDatabaseSyncMigrationCentre onDataChanged={onRefreshData} isMainAdmin={isMainAdmin} />

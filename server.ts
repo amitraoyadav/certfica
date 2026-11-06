@@ -87,6 +87,7 @@ import {
   MAIN_ADMIN_TIMEOUT_MS,
   verifyProtectedActionPassword,
 } from './api/_auth.js';
+import { handleApiRequest } from './api/_handlers.js';
 
 function fetchFromLiveProduction(endpoint: string): Promise<any> {
   return fetchFromOriginalWebsite(endpoint);
@@ -866,6 +867,22 @@ export function configureExpressApp(): express.Application {
     );
     if (req.method === 'OPTIONS') {
       return res.sendStatus(200);
+    }
+    next();
+  });
+
+  // Delegate platform health, system diagnostic, and backup operations to consolidated handler
+  app.use(async (req, res, next) => {
+    if (
+      req.path.startsWith('/api/platform') ||
+      req.path.startsWith('/api/system') ||
+      req.path.startsWith('/api/backups')
+    ) {
+      try {
+        return await handleApiRequest(req, res);
+      } catch (err: any) {
+        return res.status(500).json({ success: false, message: err?.message || 'Handler failure' });
+      }
     }
     next();
   });
@@ -1920,6 +1937,23 @@ export function configureExpressApp(): express.Application {
       return String(b.id || '').localeCompare(String(a.id || ''));
     });
 
+    // Pagination support: if req.query.page is provided, return paginated envelope
+    if (req.query.page) {
+      const page = Math.max(1, parseInt(String(req.query.page), 10) || 1);
+      const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '25'), 10) || 25));
+      const total = filtered.length;
+      const totalPages = Math.ceil(total / limit) || 1;
+      const startIndex = (page - 1) * limit;
+      const pageItems = filtered.slice(startIndex, startIndex + limit);
+      return res.json({
+        certificates: pageItems,
+        total,
+        page,
+        totalPages,
+        limit,
+      });
+    }
+
     res.json(filtered);
   });
 
@@ -2018,12 +2052,34 @@ export function configureExpressApp(): express.Application {
             'Read-Only Verification Mode Active: Live certificate issuance is temporarily locked until database and security checks pass and are approved.',
         });
       }
+
+      // Idempotency check: prevent duplicate submissions on double-clicks or rapid retries
+      const idempotencyKey = String(
+        req.headers?.['idempotency-key'] ||
+          req.headers?.['x-idempotency-key'] ||
+          req.body?.clientRequestId ||
+          req.body?.idempotencyKey ||
+          ''
+      ).trim();
+
+      if (idempotencyKey && idempotencyStore.has(idempotencyKey)) {
+        const cached = idempotencyStore.get(idempotencyKey)!;
+        if (Date.now() - cached.timestamp < 10 * 60 * 1000) {
+          return res.status(200).json(cached.cert);
+        }
+      }
+
       const newCertificate = await createAndSaveCertificateRecordAsync(req.body);
       const localCerts = getCertificates();
       if (!localCerts.some((c) => c.certificateNumber.toUpperCase() === newCertificate.certificateNumber.toUpperCase())) {
         localCerts.unshift(newCertificate);
         saveCertificates(localCerts, true);
       }
+
+      if (idempotencyKey) {
+        idempotencyStore.set(idempotencyKey, { cert: newCertificate, timestamp: Date.now() });
+      }
+
       res.status(201).json(newCertificate);
     } catch (err: any) {
       console.error('Error creating certificate:', err);
