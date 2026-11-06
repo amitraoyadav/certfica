@@ -110,6 +110,16 @@ service cloud.firestore {
         data.timestamp is string && data.timestamp.size() >= 1 && data.timestamp.size() <= 64;
     }
 
+    function isValidDatabaseBackup(data) {
+      return data.keys().hasAll(['id', 'filename', 'certificateCount', 'checksum', 'triggeredBy', 'createdAt']) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.filename is string && data.filename.size() >= 1 && data.filename.size() <= 200 &&
+        data.certificateCount is number && data.certificateCount >= 0 &&
+        data.checksum is string && data.checksum.size() == 64 &&
+        data.triggeredBy is string && data.triggeredBy.size() >= 1 && data.triggeredBy.size() <= 64 &&
+        data.createdAt is string && data.createdAt.size() >= 1 && data.createdAt.size() <= 64;
+    }
+
     match /admins/{adminId} {
       allow get: if isSignedIn() && isValidId(adminId) && (request.auth.uid == adminId || isAdmin());
       allow list: if false;
@@ -171,6 +181,13 @@ service cloud.firestore {
       allow list: if resource.data.action is string && resource.data.action.size() <= 64;
       allow create: if isValidId(logId) && isValidAuditLog(incoming()) && incoming().id == logId && isServerAuthorized(incoming());
       allow update: if false;
+      allow delete: if false;
+    }
+
+    match /database_backups/{backupId} {
+      allow get: if isValidId(backupId) && (isAdmin() || resource == null || resource.data.certificateCount is number);
+      allow list: if resource.data.certificateCount is number && resource.data.certificateCount >= 0;
+      allow create, update: if isValidId(backupId) && isValidDatabaseBackup(incoming()) && incoming().id == backupId && isServerAuthorized(incoming());
       allow delete: if false;
     }
   }

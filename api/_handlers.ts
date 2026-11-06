@@ -16,9 +16,12 @@ import {
   getRecentCertificatesForMakerAsync,
   authenticateCoreAdminPassword,
   changeCoreAdminPasswordServer,
+  changeMakerPasswordServer,
   isRequestCoreAdminAsync,
   getPersistentIdempotencyAsync,
   savePersistentIdempotencyAsync,
+  isSyntheticTestCertificate,
+  SERVER_WRITE_TOKEN,
 } from './_db.js';
 import {
   verifyAdminCredentials,
@@ -168,7 +171,7 @@ export async function handleApiRequest(req: any, res: any) {
       });
     }
 
-    const settings = getDatabaseSettings();
+    const settings: any = getDatabaseSettings();
     if (!verifyAdminCredentials(rawUser, rawPass, settings)) {
       return res.status(401).json({
         success: false,
@@ -177,13 +180,15 @@ export async function handleApiRequest(req: any, res: any) {
     }
 
     const cleanUser = rawUser.toLowerCase();
-    const token = createAdminSessionToken(cleanUser);
+    const makerSessionVer = Number(settings.makerSessionVersion) || 1;
+    const token = createAdminSessionToken(cleanUser, makerSessionVer);
     res.setHeader('Set-Cookie', buildSessionCookie('ps_admin_session', token, ADMIN_SESSION_TIMEOUT_MS));
 
     return res.status(200).json({
       success: true,
       token,
       role: 'CERTIFICATE_MAKER',
+      makerSessionVersion: makerSessionVer,
       user: {
         username: cleanUser,
         role: 'CERTIFICATE_MAKER',
@@ -196,7 +201,8 @@ export async function handleApiRequest(req: any, res: any) {
   // 3. Auth: /api/auth/me
   // ----------------------------------------------------
   if (pathname === '/api/auth/me' && method === 'GET') {
-    const isMaker = isRequestAdmin(req);
+    const makerVer = Number((getDatabaseSettings() as any).makerSessionVersion) || 1;
+    const isMaker = isRequestAdmin(req, makerVer);
     const isCore = await isRequestCoreAdminAsync(req);
     if (!isMaker && !isCore) {
       return res.status(401).json({ authenticated: false });
@@ -217,8 +223,9 @@ export async function handleApiRequest(req: any, res: any) {
   // 4. Auth: /api/auth/main-admin-status
   // ----------------------------------------------------
   if (pathname === '/api/auth/main-admin-status' && method === 'GET') {
+    const makerVer = Number((getDatabaseSettings() as any).makerSessionVersion) || 1;
     const isCore = await isRequestCoreAdminAsync(req);
-    const isMaker = isRequestAdmin(req);
+    const isMaker = isRequestAdmin(req, makerVer);
     return res.status(200).json({
       authenticated: isCore,
       isMainAdmin: isCore,
@@ -282,6 +289,41 @@ export async function handleApiRequest(req: any, res: any) {
       success: true,
       sessionInvalidated: true,
       sessionVersion: changeResult.sessionVersion,
+      message: changeResult.message,
+    });
+  }
+
+  // ----------------------------------------------------
+  // 5c. Auth: /api/auth/change-maker-password
+  // ----------------------------------------------------
+  if (pathname === '/api/auth/change-maker-password' && method === 'POST') {
+    const makerVer = Number((getDatabaseSettings() as any).makerSessionVersion) || 1;
+    const isMaker = isRequestAdmin(req, makerVer);
+    const isCore = await isRequestCoreAdminAsync(req);
+    if (!isMaker && !isCore) {
+      return res.status(401).json({
+        success: false,
+        message: 'Active administrator session required to rotate the Certificate Maker password.',
+      });
+    }
+
+    const oldPassword = String(body?.oldPassword ?? '').trim();
+    const newPassword = String(body?.newPassword ?? '').trim();
+    const confirmNewPassword = String(body?.confirmNewPassword ?? body?.confirmPassword ?? '').trim();
+
+    const changeResult = await changeMakerPasswordServer(oldPassword, newPassword, confirmNewPassword);
+    if (!changeResult.success) {
+      return res.status(changeResult.statusCode).json({
+        success: false,
+        message: changeResult.message,
+      });
+    }
+
+    res.setHeader('Set-Cookie', buildSessionCookie('ps_admin_session', '', 0));
+    return res.status(200).json({
+      success: true,
+      sessionInvalidated: true,
+      makerSessionVersion: changeResult.makerSessionVersion,
       message: changeResult.message,
     });
   }
@@ -1148,8 +1190,10 @@ export async function handleApiRequest(req: any, res: any) {
 
     try {
       const certs = await getDatabaseCertificatesAsync();
-      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const nowIso = new Date().toISOString();
+      const ts = nowIso.replace(/[:.]/g, '-');
       const filename = `certificate-database-${ts}-DAILY-CRON.json`;
+      const backupId = filename.replace(/[^a-zA-Z0-9_\-]/g, '_');
       const content = JSON.stringify(certs, null, 2);
       const checksum = crypto.createHash('sha256').update(content).digest('hex');
 
@@ -1160,32 +1204,68 @@ export async function handleApiRequest(req: any, res: any) {
         fs.writeFileSync(path.join(backupsDir, filename), content, 'utf-8');
       } catch {}
 
-      // 2. Persist backup record to Firestore collection database_backups (persistent on Vercel)
+      // 2. Persist backup execution record & audit log to Firestore (persistent on Vercel)
+      let firestorePersisted = false;
       try {
         const { getFirebaseAdminDb, getFirebaseServerConfig, getFirestoreAccessToken, toFirestoreFields } = await import('./_db.js');
         const adminDb = getFirebaseAdminDb();
+        const auditId = `audit_cron_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
         const backupDoc = {
+          id: backupId,
           filename,
           certificateCount: certs.length,
           sizeBytes: Buffer.byteLength(content),
           checksum,
           verified: true,
           triggeredBy: 'VERCEL_CRON',
-          createdAt: new Date().toISOString(),
+          createdAt: nowIso,
           retentionExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+          serverWriteToken: SERVER_WRITE_TOKEN,
+        };
+        const auditDoc = {
+          id: auditId,
+          action: 'SCHEDULED_DAILY_BACKUP',
+          details: `Scheduled daily backup ${filename} verified (${certs.length} records, SHA-256: ${checksum})`,
+          performedBy: 'VERCEL_CRON',
+          timestamp: nowIso,
+          serverWriteToken: SERVER_WRITE_TOKEN,
         };
         if (adminDb) {
-          await adminDb.collection('database_backups').doc(filename).set(backupDoc);
+          await Promise.all([
+            adminDb.collection('database_backups').doc(backupId).set(backupDoc),
+            adminDb.collection('audit_logs').doc(auditId).set(auditDoc),
+          ]);
+          firestorePersisted = true;
         } else {
           const cfg = getFirebaseServerConfig();
           const token = await getFirestoreAccessToken().catch(() => null);
-          if (token) {
-            const docUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents/database_backups/${filename}`;
-            await fetch(docUrl, {
-              method: 'PATCH',
-              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ fields: toFirestoreFields(backupDoc) }),
+          if (token || cfg.apiKey) {
+            const dbRoot = `projects/${cfg.projectId}/databases/${cfg.databaseId}/documents`;
+            const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+            const keyParam = !token && cfg.apiKey ? `?key=${encodeURIComponent(cfg.apiKey)}` : '';
+            const commitUrl = `https://firestore.googleapis.com/v1/${dbRoot}:commit${keyParam}`;
+            const commitRes = await fetch(commitUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', ...authHeaders },
+              body: JSON.stringify({
+                writes: [
+                  {
+                    update: {
+                      name: `${dbRoot}/database_backups/${backupId}`,
+                      fields: toFirestoreFields(backupDoc),
+                    },
+                  },
+                  {
+                    update: {
+                      name: `${dbRoot}/audit_logs/${auditId}`,
+                      fields: toFirestoreFields(auditDoc),
+                    },
+                    currentDocument: { exists: false },
+                  },
+                ],
+              }),
             });
+            firestorePersisted = commitRes.ok;
           }
         }
       } catch (fErr) {
@@ -1195,13 +1275,15 @@ export async function handleApiRequest(req: any, res: any) {
       return res.status(200).json({
         success: true,
         scheduled: true,
+        backupId,
         filename,
         certificateCount: certs.length,
         checksum,
         sha256: checksum,
         verified: true,
+        firestorePersisted,
         retentionPolicy: '30 Days',
-        timestamp: new Date().toISOString(),
+        timestamp: nowIso,
         message: `Scheduled daily backup ${filename} completed successfully (${certs.length} certificates).`,
       });
     } catch (err: any) {
@@ -1259,7 +1341,7 @@ export async function handleApiRequest(req: any, res: any) {
     }
   }
 
-  // 17b. Isolated Disaster Recovery Test Restoration (Never touches production)
+  // 17b. Isolated Disaster Recovery Test Restoration (Never touches production, strips synthetic test records)
   if (pathname === '/api/backups/test-restore' && method === 'POST') {
     if (!(await isRequestCoreAdminAsync(req))) {
       return res.status(isRequestAdmin(req) ? 403 : 401).json({
@@ -1268,19 +1350,18 @@ export async function handleApiRequest(req: any, res: any) {
     }
     try {
       const { filename, jsonContent } = body || {};
-      let backupCerts: Certificate[] = [];
+      let rawBackupCerts: Certificate[] = [];
 
       if (jsonContent) {
-        backupCerts = typeof jsonContent === 'string' ? JSON.parse(jsonContent) : jsonContent;
+        rawBackupCerts = typeof jsonContent === 'string' ? JSON.parse(jsonContent) : jsonContent;
       } else if (filename) {
         const filePath = path.join(process.cwd(), 'data', 'database_backups', filename);
         if (!fs.existsSync(filePath)) {
           return res.status(404).json({ message: `Backup file ${filename} not found.` });
         }
         const raw = fs.readFileSync(filePath, 'utf-8');
-        backupCerts = JSON.parse(raw);
+        rawBackupCerts = JSON.parse(raw);
       } else {
-        // Test against most recent backup
         const backupsDir = path.join(process.cwd(), 'data', 'database_backups');
         const files = fs.readdirSync(backupsDir).filter((f) => f.endsWith('.json'));
         if (files.length === 0) {
@@ -1288,12 +1369,21 @@ export async function handleApiRequest(req: any, res: any) {
         }
         files.sort((a, b) => fs.statSync(path.join(backupsDir, b)).mtimeMs - fs.statSync(path.join(backupsDir, a)).mtimeMs);
         const raw = fs.readFileSync(path.join(backupsDir, files[0]), 'utf-8');
-        backupCerts = JSON.parse(raw);
+        rawBackupCerts = JSON.parse(raw);
       }
 
-      if (!Array.isArray(backupCerts)) {
+      if (!Array.isArray(rawBackupCerts)) {
         throw new Error('Invalid backup data: expected an array of certificates.');
       }
+
+      const excludedSyntheticIds: string[] = [];
+      const backupCerts = rawBackupCerts.filter((item) => {
+        if (isSyntheticTestCertificate(item)) {
+          excludedSyntheticIds.push(String(item?.id || item?.certificateNumber || 'synthetic'));
+          return false;
+        }
+        return true;
+      });
 
       const currentCerts = await getDatabaseCertificatesAsync();
       const existingMap = new Map<string, Certificate>();
@@ -1324,19 +1414,105 @@ export async function handleApiRequest(req: any, res: any) {
         isolatedTestPassed: true,
         testMode: 'DRY_RUN_ISOLATED',
         productionDatabaseUntouched: true,
+        rawTotalInBackup: rawBackupCerts.length,
+        excludedSyntheticCount: excludedSyntheticIds.length,
+        excludedSyntheticIds,
         totalInBackup: backupCerts.length,
         validStructureCount: validStructure,
         matchedExistingCount: matchedExisting,
         newPotentialCount: newPotential,
         corruptedRecordCount: corrupted,
         productionRecordCount: currentCerts.length,
-        message: `Isolated restoration test passed: ${validStructure} records validated with 0 schema errors. Production database remained completely untouched.`,
+        message: `Isolated restoration test passed: ${validStructure} authoritative records validated with 0 schema errors (${excludedSyntheticIds.length} synthetic test record(s) automatically blocked). Production database remained completely untouched.`,
       });
     } catch (err: any) {
       return res.status(400).json({
         success: false,
         isolatedTestPassed: false,
         message: `Restoration test failed: ${err.message}`,
+      });
+    }
+  }
+
+  // 17c. Additive Backup Restore (Never overwrites existing, strictly blocks synthetic test records)
+  if (pathname === '/api/backups/restore' && method === 'POST') {
+    if (!(await isRequestCoreAdminAsync(req))) {
+      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+        message: 'Main Core Admin access required.',
+      });
+    }
+    try {
+      const { filename, jsonContent } = body || {};
+      let rawBackupCerts: Certificate[] = [];
+
+      if (jsonContent) {
+        rawBackupCerts = typeof jsonContent === 'string' ? JSON.parse(jsonContent) : jsonContent;
+      } else if (filename) {
+        const filePath = path.join(process.cwd(), 'data', 'database_backups', filename);
+        if (!fs.existsSync(filePath)) {
+          return res.status(404).json({ message: `Backup file ${filename} not found.` });
+        }
+        const raw = fs.readFileSync(filePath, 'utf-8');
+        rawBackupCerts = JSON.parse(raw);
+      } else {
+        return res.status(400).json({ message: 'Provide either filename or jsonContent to restore.' });
+      }
+
+      if (!Array.isArray(rawBackupCerts)) {
+        return res.status(400).json({ message: 'Invalid backup format: expected array of certificates.' });
+      }
+
+      const excludedSyntheticIds: string[] = [];
+      const backupCerts = rawBackupCerts.filter((item) => {
+        if (isSyntheticTestCertificate(item)) {
+          excludedSyntheticIds.push(String(item?.id || item?.certificateNumber || 'synthetic'));
+          return false;
+        }
+        return true;
+      });
+
+      const currentCerts = await getDatabaseCertificatesAsync();
+      let addedCount = 0;
+      let skippedExisting = 0;
+
+      for (const item of backupCerts) {
+        if (!item || !item.certificateNumber) continue;
+        const certNo = item.certificateNumber.trim().toUpperCase();
+        const exists = currentCerts.some(
+          (c) => c.certificateNumber.trim().toUpperCase() === certNo || (item.id && c.id === item.id)
+        );
+
+        if (exists) {
+          skippedExisting++;
+        } else {
+          currentCerts.push({
+            ...item,
+            certificateNumber: certNo,
+            isLocked: true,
+            isImmutable: true,
+          });
+          addedCount++;
+        }
+      }
+
+      if (addedCount > 0) {
+        saveDatabaseCertificates(currentCerts);
+      }
+
+      return res.status(200).json({
+        success: true,
+        rawTotalInBackup: rawBackupCerts.length,
+        excludedSyntheticCount: excludedSyntheticIds.length,
+        excludedSyntheticIds,
+        totalInBackup: backupCerts.length,
+        addedCount,
+        skippedExisting,
+        totalInDatabase: currentCerts.length,
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        message: `Restore failed: ${err.message}`,
       });
     }
   }

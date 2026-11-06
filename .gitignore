@@ -13,5 +13,5 @@ serviceAccountKey*.json
 *.pem
 *.key
 credentials*.json
-!data/core_admin_credentials.json
+data/core_admin_credentials.json
 

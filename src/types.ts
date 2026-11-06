@@ -73,6 +73,7 @@ export interface SystemSettings {
   warnDuplicateVehicle: boolean;
   adminUsername?: string;
   adminPasswordHash?: string;
+  makerSessionVersion?: number;
 }
 
 export interface DashboardStats {

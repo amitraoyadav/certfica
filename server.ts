@@ -78,7 +78,7 @@ import {
   createAndSaveCertificateRecordAsync,
   getPersistentIdempotencyAsync,
   savePersistentIdempotencyAsync,
-  EXCLUDED_SYNTHETIC_TEST_IDS,
+  isSyntheticTestCertificate,
 } from './api/_db.js';
 import {
   verifyAdminCredentials,
@@ -95,10 +95,6 @@ import { handleApiRequest } from './api/_handlers.js';
 function fetchFromLiveProduction(endpoint: string): Promise<any> {
   return fetchFromOriginalWebsite(endpoint);
 }
-
-// Server-side protected authorization secret (Never exposed to frontend code or client storage)
-const ADMIN_DELETION_PASSWORD = 'Admin00';
-const ADMIN_PROTECTED_PASSWORD = process.env.ADMIN_PROTECTED_PASSWORD || process.env.ADMIN_DELETE_PASSWORD || 'Scrap00';
 
 // Main Admin Session Store (12-hour session timeout)
 const MAIN_ADMIN_SESSION_TIMEOUT_MS = MAIN_ADMIN_TIMEOUT_MS;
@@ -120,7 +116,6 @@ function verifyDeletionPassword(provided?: string, _req?: express.Request): bool
 function verifyProtectedPassword(provided?: string, _req?: express.Request): boolean {
   return verifyProtectedActionPassword(provided);
 }
-const ADMIN_DELETE_PASSWORD = ADMIN_DELETION_PASSWORD;
 
 // Idempotency cache to prevent duplicate certificate creation on double-click or network retry
 const idempotencyStore = new Map<string, { cert: Certificate; timestamp: number }>();
@@ -155,7 +150,7 @@ const DEFAULT_SETTINGS: SystemSettings = {
   scrappingNextSeq: 272840,
   warnDuplicateVehicle: true,
   adminUsername: 'pscrappers',
-  adminPasswordHash: 'Scrap123',
+  adminPasswordHash: 'scrypt$8bfa4bd94ed4d6b63865be7d06fe5a38$c547c3903fb3da071430d05b06e3e16fa582c0e0e02793c5d5b6e6c6a6e83bd34ee73d5c3c93f1ba4bd3e2842df1b3057fcdce9846f67d8b86d3f39586a83241',
 };
 
 // Initial Seed Certificates (including the reference certificate and 4 more tests)
@@ -814,7 +809,7 @@ function getCertificates(): Certificate[] {
   }
 
   return deduplicateCertificates(list).filter(
-    (c) => c && c.id && !EXCLUDED_SYNTHETIC_TEST_IDS.has(c.id)
+    (c) => c && c.id && !isSyntheticTestCertificate(c)
   );
 }
 
@@ -876,12 +871,15 @@ export function configureExpressApp(): express.Application {
     next();
   });
 
-  // Delegate platform health, system diagnostic, and backup operations to consolidated handler
+  // Delegate platform health, system diagnostic, cron, maker auth/password rotation, and backup operations to consolidated handler
   app.use(async (req, res, next) => {
     if (
       req.path.startsWith('/api/platform') ||
       req.path.startsWith('/api/system') ||
-      req.path.startsWith('/api/backups')
+      req.path.startsWith('/api/backups') ||
+      req.path.startsWith('/api/cron') ||
+      req.path === '/api/auth/login' ||
+      req.path === '/api/auth/change-maker-password'
     ) {
       try {
         return await handleApiRequest(req, res);
@@ -893,7 +891,9 @@ export function configureExpressApp(): express.Application {
   });
 
   function isAdmin(req: express.Request): boolean {
-    return isRequestAdmin(req);
+    const settings: any = getSettings();
+    const makerVer = Number(settings?.makerSessionVersion) || 1;
+    return isRequestAdmin(req, makerVer);
   }
 
   // Helper to format certificate and scrapping numbers
@@ -4287,13 +4287,13 @@ Return strictly raw JSON.`;
     }
   });
 
-  // Protected Delete Endpoint: REQUIRES password 'Scrap00'
+  // Protected Delete Endpoint
   app.post('/api/certificates/:id/protected-delete', (req, res) => {
     try {
       const { adminPassword, confirmPhrase, reason } = req.body || {};
       const providedPassword = adminPassword || req.headers['x-admin-password'] || req.headers['x-protected-password'];
       if (!verifyProtectedPassword(providedPassword)) {
-        return res.status(403).json({ message: 'Incorrect admin authorization password. Password "Scrap00" is required.' });
+        return res.status(403).json({ message: 'Incorrect admin authorization password.' });
       }
 
       const idOrNum = decodeURIComponent(req.params.id).trim().toUpperCase();
@@ -4490,18 +4490,18 @@ Return strictly raw JSON.`;
     if (verifyProtectedPassword(String(password || ''))) {
       return res.json({ valid: true, message: 'Password verified successfully.' });
     } else {
-      return res.status(403).json({ valid: false, message: 'Invalid administrator authorization password. Password "Scrap00" is required.' });
+      return res.status(403).json({ valid: false, message: 'Invalid administrator authorization password.' });
     }
   });
 
-  // Update Full Certificate Details - Protected operation requiring password 'Scrap00'
+  // Update Full Certificate Details - Protected operation
   app.put('/api/certificates/:id', (req, res) => {
     try {
       if (!isAdmin(req)) {
         return res.status(401).json({ message: 'Administrator login required.' });
       }
 
-      // Password verification required for all certificate updates (Main Admin session, Admin00, or Scrapbyparivahan)
+      // Password verification required for all certificate updates
       const providedPassword = req.body.adminPassword || req.headers['x-admin-password'] || req.headers['x-protected-password'];
       if (!verifyProtectedPassword(providedPassword, req)) {
         recordAuditLog({
@@ -4512,7 +4512,7 @@ Return strictly raw JSON.`;
         }, req);
         return res.status(403).json({
           success: false,
-          message: 'PROTECTED OPERATION REJECTED: Invalid administrator authorization password. Password "Admin00" or "Scrapbyparivahan" is required.',
+          message: 'PROTECTED OPERATION REJECTED: Invalid administrator authorization password.',
         });
       }
 
@@ -4613,7 +4613,7 @@ Return strictly raw JSON.`;
     const providedPassword = req.body.adminPassword || req.headers['x-admin-password'] || req.headers['x-protected-password'];
     if (!verifyProtectedPassword(providedPassword)) {
       return res.status(403).json({
-        message: 'PROTECTED OPERATION REJECTED: Invalid administrator authorization password. Password "Scrap00" is required.',
+        message: 'PROTECTED OPERATION REJECTED: Invalid administrator authorization password.',
       });
     }
     const { status, reason } = req.body;
@@ -5111,7 +5111,7 @@ Return strictly raw JSON.`;
         }, req);
 
         return res.status(403).json({
-          message: 'DELETE REQUEST REJECTED: Invalid administrator authorization password. Password "Admin00" is required.',
+          message: 'DELETE REQUEST REJECTED: Invalid administrator authorization password.',
         });
       }
 
@@ -5237,8 +5237,9 @@ Return strictly raw JSON.`;
     const updated: SystemSettings = {
       ...current,
       ...req.body,
-      adminUsername: 'pscrappers',
-      adminPasswordHash: 'Scrap123',
+      adminUsername: current.adminUsername || 'pscrappers',
+      adminPasswordHash: current.adminPasswordHash,
+      makerSessionVersion: current.makerSessionVersion,
     };
     saveSettings(updated);
     res.json({ success: true, message: 'Settings saved successfully.' });

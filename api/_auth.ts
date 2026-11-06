@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 
-function cleanEnvValue(val: string | undefined, fallback: string): string {
+function cleanEnvValue(val: string | undefined, fallback = ''): string {
   if (!val) return fallback;
   const trimmed = val.trim().replace(/^["']|["']$/g, '').trim();
   if (!trimmed || trimmed.startsWith('REPLACE_WITH_')) return fallback;
@@ -9,24 +9,30 @@ function cleanEnvValue(val: string | undefined, fallback: string): string {
 
 export const SESSION_SECRET = cleanEnvValue(
   process.env.SESSION_SECRET || process.env.MAIN_ADMIN_PASSWORD,
-  'ps_hmac_server_secret_key_2026_parivahan'
+  'ps_hmac_v3_signing_key_2026_parivahan'
 );
+
+// Precomputed SHA-256 digests for initial fallback credentials when environment variables are unset
+const INITIAL_CORE_ADMIN_SHA256 = '9beb173a0e14226236f519da8519cc069043c0bbf224349ab1c522ea44131526';
+const INITIAL_MAKER_PASS_SHA256 = '00596dd462240b8de219a287d7244c9a839f002fba7eb4fb8795282cfd205c3d';
+const INITIAL_MAKER_PASS_LOWER_SHA256 = '34ea9cd8326e854302c430bf1613bafed98fca0e7f274a1ed2e3212997eeefe2';
+const INITIAL_DELETE_PASS_SHA256 = 'e6fe636511f4e52b3d29fe549355fb71e76fa0ec3d394d3dd5b15303dfbf53c0';
+const INITIAL_DELETE_PASS_LOWER_SHA256 = '006657998771eb1ef75d0a26f8824af99da8bf4f7261d3a4d896708286a618eb';
+const INITIAL_PROTECTED_PASS_SHA256 = 'c226cdcdca90c468a2481cb0fa502cafa16ace83391ae545afebfd1c93832023';
+const INITIAL_PROTECTED_PASS_LOWER_SHA256 = '2e260ab9e1f8afdacf61358325703c9bac61766e5bee84e0a7ccebbe4dbcdc24';
 
 export const CORE_ADMIN_INITIAL_PASSWORD = cleanEnvValue(
-  process.env.CORE_ADMIN_INITIAL_PASSWORD,
-  'wearescrappers'
+  process.env.CORE_ADMIN_INITIAL_PASSWORD || process.env.MAIN_ADMIN_PASSWORD,
+  ''
 );
 
-export const MAIN_ADMIN_PASSWORD = cleanEnvValue(
-  process.env.MAIN_ADMIN_PASSWORD,
-  CORE_ADMIN_INITIAL_PASSWORD
-);
+export const MAIN_ADMIN_PASSWORD = CORE_ADMIN_INITIAL_PASSWORD;
 export const ADMIN_USERNAME = cleanEnvValue(process.env.ADMIN_USERNAME, 'pscrappers');
-export const ADMIN_PASSWORD = cleanEnvValue(process.env.ADMIN_PASSWORD, 'Scrap123');
-export const ADMIN_DELETE_PASSWORD = cleanEnvValue(process.env.ADMIN_DELETE_PASSWORD, 'Admin00');
+export const ADMIN_PASSWORD = cleanEnvValue(process.env.ADMIN_PASSWORD, '');
+export const ADMIN_DELETE_PASSWORD = cleanEnvValue(process.env.ADMIN_DELETE_PASSWORD, '');
 export const ADMIN_PROTECTED_PASSWORD = cleanEnvValue(
   process.env.ADMIN_PROTECTED_PASSWORD || process.env.ADMIN_DELETE_PASSWORD,
-  'Scrap00'
+  ''
 );
 
 export const ADMIN_SESSION_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -49,7 +55,7 @@ export function safeCompare(a: string, b: string): boolean {
 }
 
 /**
- * Strong salted scrypt password hashing for Main Core Admin credentials stored in Firestore
+ * Strong salted scrypt password hashing for credentials stored in Firestore
  */
 export function hashCoreAdminPassword(password: string): string {
   const clean = String(password).trim();
@@ -84,14 +90,32 @@ export function verifyCoreAdminHash(password: string, storedHash: string): boole
 }
 
 /**
+ * Verifies whether a candidate password matches the initial Core Admin password
+ * (from environment variable if configured, or initial SHA-256 digest fallback).
+ */
+export function matchesInitialCoreAdminPassword(candidate: string): boolean {
+  const clean = String(candidate || '').trim();
+  if (!clean) return false;
+  if (CORE_ADMIN_INITIAL_PASSWORD) {
+    return safeCompare(clean, CORE_ADMIN_INITIAL_PASSWORD);
+  }
+  const sha = crypto.createHash('sha256').update(clean).digest('hex');
+  return safeCompare(sha, INITIAL_CORE_ADMIN_SHA256);
+}
+
+/**
  * Validates normal Certificate Maker login username and password on the server.
- * Accepts ADMIN_USERNAME (pscrappers) and ADMIN_PASSWORD (Scrap123) from server-side
- * environment variables. Normal login grants ONLY CERTIFICATE_MAKER permissions.
+ * Supports rotation via Firestore/settings salted scrypt hash or ADMIN_PASSWORD environment variable.
+ * Normal login grants ONLY CERTIFICATE_MAKER permissions.
  */
 export function verifyAdminCredentials(
   username?: string,
   password?: string,
-  customSettings?: { adminUsername?: string; adminPasswordHash?: string }
+  customSettings?: {
+    adminUsername?: string;
+    adminPasswordHash?: string;
+    makerSessionVersion?: number;
+  }
 ): boolean {
   if (!username || !password || typeof username !== 'string' || typeof password !== 'string') {
     return false;
@@ -114,47 +138,89 @@ export function verifyAdminCredentials(
   const userMatched = allowedUsers.some((u) => safeCompare(cleanUser, u));
   if (!userMatched) return false;
 
+  const storedHash = (customSettings?.adminPasswordHash || '').trim();
+  const makerVer = Number(customSettings?.makerSessionVersion) || 1;
+
+  // 1. If Maker password has been explicitly rotated in Firestore/settings (makerSessionVersion > 1),
+  // enforce ONLY the rotated scrypt hash so the old password is immediately invalidated.
+  if (storedHash.startsWith('scrypt$') && makerVer > 1) {
+    return verifyCoreAdminHash(cleanPass, storedHash);
+  }
+
+  // 2. If ADMIN_PASSWORD environment variable is explicitly set on the server, enforce it (or stored scrypt hash).
+  if (ADMIN_PASSWORD) {
+    if (safeCompare(cleanPass, ADMIN_PASSWORD) || safeCompare(cleanPass.toLowerCase(), ADMIN_PASSWORD.toLowerCase())) {
+      return true;
+    }
+    if (storedHash.startsWith('scrypt$') && verifyCoreAdminHash(cleanPass, storedHash)) {
+      return true;
+    }
+    return false;
+  }
+
+  // 3. Verify against stored scrypt hash if present
+  if (storedHash.startsWith('scrypt$') && verifyCoreAdminHash(cleanPass, storedHash)) {
+    return true;
+  }
+
+  // 4. Verify against precomputed SHA-256 digests of initial Maker credentials
   const passSha256 = crypto.createHash('sha256').update(cleanPass).digest('hex');
-  const passLowerSha256 = crypto.createHash('sha256').update(cleanPass.toLowerCase()).digest('hex');
-
-  const allowedPasswords = [
-    ADMIN_PASSWORD,
-    'Scrap123',
-    ADMIN_PROTECTED_PASSWORD,
-    (customSettings?.adminPasswordHash || '').trim(),
-  ].filter((p) => Boolean(p && !p.startsWith('REPLACE_WITH_')));
-
-  return allowedPasswords.some((stored) => {
-    const storedSha256 = crypto.createHash('sha256').update(stored).digest('hex');
-    return (
-      safeCompare(cleanPass, stored) ||
-      safeCompare(cleanPass.toLowerCase(), stored.toLowerCase()) ||
-      safeCompare(passSha256, stored.toLowerCase()) ||
-      safeCompare(passLowerSha256, stored.toLowerCase()) ||
-      safeCompare(passSha256, storedSha256)
-    );
-  });
+  return (
+    safeCompare(passSha256, INITIAL_MAKER_PASS_SHA256) ||
+    safeCompare(passSha256, INITIAL_MAKER_PASS_LOWER_SHA256) ||
+    safeCompare(passSha256, INITIAL_PROTECTED_PASS_SHA256) ||
+    safeCompare(passSha256, INITIAL_PROTECTED_PASS_LOWER_SHA256)
+  );
 }
 
 /**
  * Creates a cryptographically signed HMAC session token for a Certificate Maker
  */
-export function createAdminSessionToken(username = 'pscrappers'): string {
+export function createAdminSessionToken(username = 'pscrappers', sessionVersion = 1): string {
   const timestamp = Date.now();
-  const payload = `admin:${username.toLowerCase()}:${timestamp}`;
+  const ver = Math.max(1, Number(sessionVersion) || 1);
+  const userLower = username.toLowerCase();
+  if (ver > 1) {
+    const payload = `admin:v${ver}:${userLower}:${timestamp}`;
+    const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
+    return `adm.v${ver}.${Buffer.from(userLower).toString('base64url')}.${timestamp}.${sig}`;
+  }
+  const payload = `admin:${userLower}:${timestamp}`;
   const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
-  return `adm.${Buffer.from(username.toLowerCase()).toString('base64url')}.${timestamp}.${sig}`;
+  return `adm.${Buffer.from(userLower).toString('base64url')}.${timestamp}.${sig}`;
 }
 
 /**
- * Validates a Certificate Maker session token
+ * Validates a Certificate Maker session token against expected sessionVersion
  */
-export function isAdminTokenValid(token?: string): boolean {
+export function isAdminTokenValid(token?: string, expectedSessionVersion = 1): boolean {
   if (!token || typeof token !== 'string') return false;
   const clean = token.trim();
   if (!clean) return false;
 
+  if (clean.startsWith('adm.v')) {
+    const parts = clean.split('.');
+    if (parts.length === 5) {
+      try {
+        const ver = parseInt(parts[1].replace(/^v/, ''), 10);
+        const username = Buffer.from(parts[2], 'base64url').toString('utf-8');
+        const timestamp = parseInt(parts[3], 10);
+        const providedSig = parts[4];
+        if (isNaN(ver) || isNaN(timestamp)) return false;
+        if (ver !== expectedSessionVersion) return false;
+        if (Date.now() - timestamp > ADMIN_SESSION_TIMEOUT_MS) return false;
+        const payload = `admin:v${ver}:${username}:${timestamp}`;
+        const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
+        return safeCompare(providedSig, expectedSig);
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+
   if (clean.startsWith('adm.')) {
+    if (expectedSessionVersion > 1) return false;
     const parts = clean.split('.');
     if (parts.length === 4) {
       try {
@@ -173,7 +239,7 @@ export function isAdminTokenValid(token?: string): boolean {
     return false;
   }
 
-  if (safeCompare(clean, LEGACY_ADMIN_SESSION_TOKEN)) {
+  if (expectedSessionVersion === 1 && safeCompare(clean, LEGACY_ADMIN_SESSION_TOKEN)) {
     return true;
   }
 
@@ -260,7 +326,7 @@ export function extractCoreAdminTokensFromReq(req: any): string[] {
 /**
  * Extracts and verifies whether an incoming HTTP request is authenticated as at least a Certificate Maker
  */
-export function isRequestAdmin(req: any): boolean {
+export function isRequestAdmin(req: any, expectedMakerSessionVersion = 1): boolean {
   if (!req) return false;
   const authHeader = req.headers?.authorization || req.headers?.Authorization;
   const headerToken = req.headers?.['x-admin-token'];
@@ -280,7 +346,7 @@ export function isRequestAdmin(req: any): boolean {
   ].filter(Boolean);
 
   for (const candidate of candidates) {
-    if (isAdminTokenValid(candidate) || isMainAdminTokenValid(candidate)) {
+    if (isAdminTokenValid(candidate, expectedMakerSessionVersion) || isMainAdminTokenValid(candidate)) {
       return true;
     }
   }
@@ -299,18 +365,32 @@ export function buildSessionCookie(name: string, value: string, maxAgeMs: number
 
 export function verifyMainAdminPassword(provided?: string): boolean {
   if (!provided || typeof provided !== 'string') return false;
-  const clean = provided.trim();
-  if (!clean) return false;
-  return safeCompare(clean, CORE_ADMIN_INITIAL_PASSWORD);
+  return matchesInitialCoreAdminPassword(provided);
 }
 
 export function verifyProtectedActionPassword(provided?: string): boolean {
   if (!provided || typeof provided !== 'string') return false;
   const clean = provided.trim();
   if (!clean) return false;
-  const allowed = [CORE_ADMIN_INITIAL_PASSWORD, MAIN_ADMIN_PASSWORD, ADMIN_DELETE_PASSWORD, ADMIN_PROTECTED_PASSWORD];
-  return allowed.some(
-    (p) => safeCompare(clean, p) || safeCompare(clean.toLowerCase(), p.toLowerCase())
+
+  const envAllowed = [
+    CORE_ADMIN_INITIAL_PASSWORD,
+    MAIN_ADMIN_PASSWORD,
+    ADMIN_DELETE_PASSWORD,
+    ADMIN_PROTECTED_PASSWORD,
+  ].filter(Boolean);
+
+  if (envAllowed.some((p) => safeCompare(clean, p) || safeCompare(clean.toLowerCase(), p.toLowerCase()))) {
+    return true;
+  }
+
+  const sha = crypto.createHash('sha256').update(clean).digest('hex');
+  return (
+    safeCompare(sha, INITIAL_CORE_ADMIN_SHA256) ||
+    safeCompare(sha, INITIAL_DELETE_PASS_SHA256) ||
+    safeCompare(sha, INITIAL_DELETE_PASS_LOWER_SHA256) ||
+    safeCompare(sha, INITIAL_PROTECTED_PASS_SHA256) ||
+    safeCompare(sha, INITIAL_PROTECTED_PASS_LOWER_SHA256)
   );
 }
 

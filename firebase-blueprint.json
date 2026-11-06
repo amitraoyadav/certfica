@@ -128,6 +128,23 @@
         "createdAt": { "type": "string", "format": "date-time", "maxLength": 64 }
       },
       "required": ["id", "probeKey", "purpose", "createdAt"]
+    },
+    "DatabaseBackup": {
+      "title": "DatabaseBackup",
+      "description": "Verified Database Backup Manifest & Scheduled Cron Execution Record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "filename": { "type": "string", "maxLength": 200 },
+        "certificateCount": { "type": "number" },
+        "sizeBytes": { "type": "number" },
+        "checksum": { "type": "string", "maxLength": 64 },
+        "verified": { "type": "boolean" },
+        "triggeredBy": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "retentionExpiresAt": { "type": "string", "format": "date-time", "maxLength": 64 }
+      },
+      "required": ["id", "filename", "certificateCount", "checksum", "triggeredBy", "createdAt"]
     }
   },
   "firestore": {
@@ -158,6 +175,10 @@
     "/server_connection_tests/{testId}": {
       "schema": { "$ref": "#/entities/ServerConnectionTest" },
       "description": "Temporary test collection used solely for server read/write/delete connectivity verification"
+    },
+    "/database_backups/{backupId}": {
+      "schema": { "$ref": "#/entities/DatabaseBackup" },
+      "description": "Persistent database backup metadata and scheduled Vercel Cron execution records"
     }
   }
 }

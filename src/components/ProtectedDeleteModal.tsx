@@ -267,12 +267,12 @@ export const ProtectedDeleteModal: React.FC<ProtectedDeleteModalProps> = ({
               type="password"
               value={adminPassword}
               onChange={(e) => setAdminPassword(e.target.value)}
-              placeholder="Enter deletion password (Admin00)"
+              placeholder="Enter authorization password"
               required
               className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-[#0d2847] bg-white font-medium"
             />
             <span className="text-[10px] text-slate-500 mt-1 block">
-              Authorization password (Admin00) is verified directly on the secure backend.
+              Authorization password is verified directly on the secure backend.
             </span>
           </div>
 

@@ -10,6 +10,8 @@ import { getFirestore as getAdminFirestore, type Firestore as AdminFirestore } f
 import type { Certificate, SystemSettings } from '../src/types';
 import {
   CORE_ADMIN_INITIAL_PASSWORD,
+  matchesInitialCoreAdminPassword,
+  verifyAdminCredentials,
   hashCoreAdminPassword,
   verifyCoreAdminHash,
   createCoreAdminToken,
@@ -48,7 +50,32 @@ export const EXCLUDED_SYNTHETIC_TEST_IDS = new Set<string>([
   'cert-1793982914462-0e4f869fbc18',
   'cert-1793983972204-32451644c600',
   'cert-1793984129303-38318eb06f4e',
+  'cert-1793986942086-f7fa134b6def',
+  'cert-1793364775204-47122786c04d',
+  'cert-1793364787559-a85df20336a0',
+  'cert-1793364723381-97d12500c39d',
 ]);
+
+/**
+ * Deterministic guard that detects and excludes synthetic diagnostic/integration test records
+ * so that snapshot restorations or cache reads can never introduce synthetic test records into production.
+ */
+export function isSyntheticTestCertificate(c: any): boolean {
+  if (!c || typeof c !== 'object') return false;
+  if (c.id && EXCLUDED_SYNTHETIC_TEST_IDS.has(String(c.id))) return true;
+  const owner = String(c.ownerName || '').trim().toUpperCase();
+  const veh = String(c.vehicleRegistrationNumber || '').trim().toUpperCase();
+  const chassis = String(c.chassisNumber || '').trim().toUpperCase();
+  const engine = String(c.engineNumber || '').trim().toUpperCase();
+  if (
+    owner === 'DIAGNOSTIC TEST VEHICLE OWNER' ||
+    owner === 'INTEGRATION TEST USER' ||
+    (veh.startsWith('TEST-DL-') && chassis.startsWith('TEST-CH-') && engine.startsWith('TEST-EN-'))
+  ) {
+    return true;
+  }
+  return false;
+}
 
 // Async mutex lock to prevent duplicate issuance during simultaneous requests
 class AsyncMutex {
@@ -312,7 +339,7 @@ function fromFirestoreDocument(docObj: any): any {
   return out;
 }
 
-const SERVER_WRITE_TOKEN = 'ps_srv_tx_auth_9f8e7d6c5b4a_2026';
+export const SERVER_WRITE_TOKEN = 'ps_srv_tx_auth_9f8e7d6c5b4a_2026';
 let firestoreCertsCache: { certs: Certificate[]; fetchedAt: number } | null = null;
 let inFlightFirestoreCertsPromise: Promise<Certificate[] | null> | null = null;
 let firestoreQuotaCooldownUntil = 0;
@@ -627,7 +654,7 @@ export async function fetchCertificatesFromFirestoreServer(forceRefresh = false)
         const certs = ((Array.isArray(queryData) ? queryData : [])
           .filter((item: any) => item && item.document)
           .map((item: any) => fromFirestoreDocument(item.document)) as Certificate[])
-          .filter((c) => c && c.id && !EXCLUDED_SYNTHETIC_TEST_IDS.has(c.id));
+          .filter((c) => c && c.id && !isSyntheticTestCertificate(c));
         firestoreCertsCache = { certs, fetchedAt: Date.now() };
         return certs;
       }
@@ -677,7 +704,7 @@ export async function fetchCertificatesFromFirestoreServer(forceRefresh = false)
       const certs = (queryData
         .filter((item: any) => item && item.document)
         .map((item: any) => fromFirestoreDocument(item.document)) as Certificate[])
-        .filter((c) => c && c.id && !EXCLUDED_SYNTHETIC_TEST_IDS.has(c.id));
+        .filter((c) => c && c.id && !isSyntheticTestCertificate(c));
       firestoreCertsCache = { certs, fetchedAt: Date.now() };
       return certs;
     } catch (err: any) {
@@ -943,7 +970,7 @@ export function getDatabaseCertificates(): Certificate[] {
       if (raw && raw.trim()) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed) && parsed.length >= 938) {
-          const filtered = parsed.filter((c: any) => c && c.id && !EXCLUDED_SYNTHETIC_TEST_IDS.has(c.id));
+          const filtered = parsed.filter((c: any) => c && c.id && !isSyntheticTestCertificate(c));
           inMemoryCertificates = filtered;
           return filtered;
         }
@@ -1453,8 +1480,8 @@ export async function authenticateCoreAdminPassword(providedPassword?: string): 
     return { authenticated: true, sessionVersion: stored.sessionVersion, token };
   }
 
-  // First-time initialization from server-side CORE_ADMIN_INITIAL_PASSWORD
-  if (safeCompare(clean, CORE_ADMIN_INITIAL_PASSWORD)) {
+  // First-time initialization from server-side initial Core Admin password
+  if (matchesInitialCoreAdminPassword(clean)) {
     const initialDoc: CoreAdminCredentialsDoc = {
       passwordHash: hashCoreAdminPassword(clean),
       sessionVersion: 1,
@@ -1536,6 +1563,117 @@ export async function changeCoreAdminPasswordServer(
     statusCode: 200,
     message: 'Main Core Admin password updated successfully. Previous Core Admin sessions have been invalidated.',
     sessionVersion: nextSessionVersion,
+  };
+}
+
+/**
+ * Rotates the Certificate Maker password securely (restricted to MAIN_CORE_ADMIN):
+ * - Verifies current Maker password
+ * - Stores new salted scrypt hash in settings and Firestore `/settings/maker_credentials`
+ * - Increments makerSessionVersion so old Maker tokens and old Maker passwords immediately stop working
+ * - Preserves 100% of certificates untouched
+ */
+export async function changeMakerPasswordServer(
+  oldPassword?: string,
+  newPassword?: string,
+  confirmNewPassword?: string
+): Promise<{
+  success: boolean;
+  statusCode: number;
+  message: string;
+  makerSessionVersion?: number;
+}> {
+  const cleanOld = String(oldPassword ?? '').trim();
+  const cleanNew = String(newPassword ?? '').trim();
+  const cleanConfirm = String(confirmNewPassword ?? '').trim();
+
+  if (!cleanOld || !cleanNew || !cleanConfirm) {
+    return {
+      success: false,
+      statusCode: 400,
+      message: 'Current Maker Password, New Password, and Confirm New Password are all required.',
+    };
+  }
+
+  if (cleanNew !== cleanConfirm) {
+    return {
+      success: false,
+      statusCode: 400,
+      message: 'New Maker password and Confirm New Password do not match.',
+    };
+  }
+
+  if (cleanNew.length < 7) {
+    return {
+      success: false,
+      statusCode: 400,
+      message: 'New Maker password must be at least 7 characters long.',
+    };
+  }
+
+  const currentSettings: any = getDatabaseSettings();
+  const validOld = verifyAdminCredentials(currentSettings.adminUsername || 'pscrappers', cleanOld, currentSettings);
+  if (!validOld) {
+    return {
+      success: false,
+      statusCode: 401,
+      message: 'Incorrect current Certificate Maker password. Rotation rejected.',
+    };
+  }
+
+  const nextMakerSessionVersion = (Number(currentSettings.makerSessionVersion) || 1) + 1;
+  const newHash = hashCoreAdminPassword(cleanNew);
+  const now = new Date().toISOString();
+
+  const updatedSettings: any = {
+    ...currentSettings,
+    adminPasswordHash: newHash,
+    makerSessionVersion: nextMakerSessionVersion,
+    updatedAt: now,
+  };
+  saveDatabaseSettings(updatedSettings);
+
+  // Persist rotated Maker credentials to Firestore `/settings/maker_credentials`
+  const cfg = getFirebaseServerConfig();
+  const token = await getFirestoreAccessToken().catch(() => null);
+  if (token || cfg.apiKey) {
+    try {
+      const dbRoot = `projects/${cfg.projectId}/databases/${cfg.databaseId}/documents`;
+      const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+      const keyParam = !token && cfg.apiKey ? `?key=${encodeURIComponent(cfg.apiKey)}` : '';
+      const commitUrl = `https://firestore.googleapis.com/v1/${dbRoot}:commit${keyParam}`;
+      await fetch(commitUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        body: JSON.stringify({
+          writes: [
+            {
+              update: {
+                name: `${dbRoot}/settings/maker_credentials`,
+                fields: toFirestoreFields({
+                  adminUsername: currentSettings.adminUsername || 'pscrappers',
+                  passwordHash: newHash,
+                  makerSessionVersion: nextMakerSessionVersion,
+                  updatedAt: now,
+                  certificatePrefix: currentSettings.certificatePrefix || 'PS/26/R',
+                  certificateNextSeq: Math.max(1000, Number(currentSettings.certificateNextSeq) || 1000842),
+                  scrappingPrefix: currentSettings.scrappingPrefix || 'REG-C',
+                  scrappingNextSeq: Math.max(1000, Number(currentSettings.scrappingNextSeq) || 273682),
+                  serverWriteToken: SERVER_WRITE_TOKEN,
+                }),
+              },
+            },
+          ],
+        }),
+      });
+    } catch {}
+  }
+
+  return {
+    success: true,
+    statusCode: 200,
+    message: 'Certificate Maker password rotated successfully. Previous Maker sessions have been invalidated.',
+    makerSessionVersion: nextMakerSessionVersion,
   };
 }
 

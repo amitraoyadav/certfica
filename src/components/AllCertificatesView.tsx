@@ -601,7 +601,7 @@ export const AllCertificatesView: React.FC<AllCertificatesViewProps> = ({
                   type="button"
                   onClick={() => setEditModalCert(cert)}
                   className="flex-1 py-2 text-xs font-semibold text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg flex items-center justify-center gap-1 transition-colors cursor-pointer min-h-[40px]"
-                  title="Edit Certificate (Password: Scrap00)"
+                  title="Edit Certificate"
                 >
                   <Edit3 className="w-3.5 h-3.5 text-amber-700" />
                   Edit
@@ -754,7 +754,7 @@ export const AllCertificatesView: React.FC<AllCertificatesViewProps> = ({
                           type="button"
                           onClick={() => setEditModalCert(cert)}
                           className="px-2.5 py-1 text-xs font-semibold text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded flex items-center gap-1 transition-colors cursor-pointer"
-                          title="Edit Certificate Details (Requires Password Scrap00)"
+                          title="Edit Certificate Details (Authorization Required)"
                         >
                           <Edit3 className="w-3.5 h-3.5 text-amber-700" />
                           Edit
@@ -1040,7 +1040,7 @@ export const AllCertificatesView: React.FC<AllCertificatesViewProps> = ({
           }
         }}
       />
-      {/* Edit Certificate Modal (Protected by Scrap00 password) */}
+      {/* Edit Certificate Modal */}
       <EditCertificateModal
         certificate={editModalCert}
         isOpen={Boolean(editModalCert)}

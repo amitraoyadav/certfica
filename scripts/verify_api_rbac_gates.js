@@ -6,10 +6,11 @@ async function verifyRbacGates() {
   console.log('======================================================================');
 
   // 1. Obtain Certificate Maker token
+  const makerPassword = process.env.ADMIN_PASSWORD || '';
   const loginRes = await fetch(`${BASE_URL}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'pscrappers', password: 'Scrap123' }),
+    body: JSON.stringify({ username: 'pscrappers', password: makerPassword }),
   });
   const loginData = await loginRes.json();
   const makerToken = loginData.token;

@@ -82,7 +82,7 @@ export const EditCertificateModal: React.FC<EditCertificateModalProps> = ({
     }
     const mainAdminToken = typeof window !== 'undefined' ? sessionStorage.getItem('ps_main_admin_token') : null;
     if (!mainAdminToken && !adminPassword.trim()) {
-      setErrorMessage('Authorization password is required for certificate modification (Admin00 or Scrapbyparivahan).');
+      setErrorMessage('Authorization password is required for certificate modification.');
       return;
     }
 
@@ -494,11 +494,11 @@ export const EditCertificateModal: React.FC<EditCertificateModalProps> = ({
             </div>
           </div>
 
-          {/* Section 6: Master Authorization Password Confirmation (Mandatory Scrap00) */}
+          {/* Section 6: Master Authorization Password Confirmation */}
           <div className="p-3.5 bg-amber-50/90 border border-amber-300 rounded-xl space-y-2">
             <div className="flex items-center gap-2 text-amber-950 font-bold text-xs">
               <KeyRound className="w-4 h-4 text-amber-700 shrink-0" />
-              <span>Authorization Password Required (Scrap00)</span>
+              <span>Authorization Password Required</span>
             </div>
             <p className="text-[11px] text-amber-900 leading-relaxed">
               Certificate modification requires master administrative authorization password verification. Unauthenticated or incorrect password requests will be safely rejected on the server.
@@ -510,7 +510,7 @@ export const EditCertificateModal: React.FC<EditCertificateModalProps> = ({
                 required
                 value={adminPassword}
                 onChange={(e) => setAdminPassword(e.target.value)}
-                placeholder="Enter Authorization Password (Admin00 or Scrapbyparivahan)"
+                placeholder="Enter Authorization Password"
                 className="w-full pl-8 pr-3 py-2 text-xs border border-amber-300 bg-white rounded-lg focus:ring-2 focus:ring-[#0d2847] outline-none font-mono"
               />
             </div>

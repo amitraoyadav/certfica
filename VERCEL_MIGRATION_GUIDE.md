@@ -15,7 +15,7 @@ As requested, all secondary Main Admin password prompts, lock banners, and gatin
 - **Direct Navigation:** Clicking **All Certificates** opens the complete certificate registry immediately.
 - **Unrestricted Search & Filtering:** Full search across all 920 records (including older historical certificates) is active.
 - **Complete Dashboard Visibility:** Dashboard displays the full 920 permanent records directly without truncation.
-- **Backend Protected Deletion:** Sensitive deletion actions remain strictly protected by the master deletion password (`Admin00`).
+- **Backend Protected Deletion:** Sensitive deletion actions remain strictly protected by the master deletion password (`ADMIN_DELETE_PASSWORD`).
 
 ---
 
@@ -61,11 +61,11 @@ All 8 files are generated with verified SHA-256 checksums in `/data/exports/` an
 ```env
 # Standard Admin Login Credentials
 ADMIN_USERNAME=pscrappers
-ADMIN_PASSWORD=Scrap123
+ADMIN_PASSWORD=<SET_MAKER_PASSWORD_IN_VERCEL_ENV>
 
 # Master Deletion Authorization (Protected Actions)
-ADMIN_DELETE_PASSWORD=Admin00
-ADMIN_PROTECTED_PASSWORD=Scrap00
+ADMIN_DELETE_PASSWORD=<SET_DELETE_PASSWORD_IN_VERCEL_ENV>
+ADMIN_PROTECTED_PASSWORD=<SET_PROTECTED_PASSWORD_IN_VERCEL_ENV>
 
 # Standby Source / Live URL
 LIVE_DATABASE_URL=https://crm-parivahanscrappers.ai.studio

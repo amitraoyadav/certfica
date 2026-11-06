@@ -11,5 +11,7 @@
   "scrappingNextSeq": 784785,
   "warnDuplicateVehicle": true,
   "adminUsername": "pscrappers",
-  "adminPasswordHash": "Scrap123"
+  "adminPasswordHash": "scrypt$6f7d9f43f38fdd541a945856516dbabf$9162c7fddc82631f4dd35a8605af3cc2ed1a9506c3a9ff676f18a39e14740cd23c53ed522cbdf6c4625aaae13eae35c2448e04898a5a2373f36e802346387ae2",
+  "makerSessionVersion": 3,
+  "updatedAt": "2026-11-06T18:35:26.417Z"
 }

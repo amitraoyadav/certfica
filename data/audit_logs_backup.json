@@ -2915,5 +2915,71 @@
     "details": "Official certificate PS/26/R4170606 verified and authenticated with 100% SHA-256 integrity match.",
     "ip": "127.0.0.1",
     "userAgent": "node"
+  },
+  {
+    "id": "audit-1793990012078-7038939e",
+    "timestamp": "2026-11-06T18:33:32.078Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin privileges unlocked successfully.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793990012807-c54fc48c",
+    "timestamp": "2026-11-06T18:33:32.807Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin password changed and session version incremented to v10.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793990012867-bd417f73",
+    "timestamp": "2026-11-06T18:33:32.867Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_FAILED",
+    "actor": "user",
+    "details": "Failed Main Core Admin elevation attempt with incorrect password.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793990012924-0ffa292f",
+    "timestamp": "2026-11-06T18:33:32.924Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin privileges unlocked successfully.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793990013092-a9a411dd",
+    "timestamp": "2026-11-06T18:33:33.093Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin password changed and session version incremented to v11.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1793990013151-0fdf4ce6",
+    "timestamp": "2026-11-06T18:33:33.151Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin privileges unlocked successfully.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
   }
 ]
