@@ -29,6 +29,7 @@ interface CreateCertificateFormProps {
   onCertificateCreated: (cert: Certificate) => void;
   onCancel: () => void;
   onLogout?: () => void;
+  onSessionExpired?: (message?: string) => void;
   onViewExistingCertificate?: (certNumber: string) => void;
   onViewRecentCertificate?: (cert: Certificate) => void;
   onRequestReissue?: (cert: Certificate) => void;
@@ -66,6 +67,7 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
   onCertificateCreated,
   onCancel,
   onLogout,
+  onSessionExpired,
   onViewExistingCertificate,
   onViewRecentCertificate,
   onRequestReissue,
@@ -166,12 +168,16 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
   const fetchNext = async (isMounted = true) => {
     setIsFetchingNumbers(true);
     try {
-      let res = await fetch(getApiUrl('/api/certificates/next-numbers'));
+      const reqInit: RequestInit = {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      };
+      let res = await fetch(getApiUrl('/api/certificates/next-numbers'), reqInit);
       if (!res.ok) {
-        res = await fetch(getApiUrl('/api/certificates/next-number'));
+        res = await fetch(getApiUrl('/api/certificates/next-number'), reqInit);
       }
       if (!res.ok) {
-        res = await fetch(getApiUrl('/api/certificates?action=next-numbers'));
+        res = await fetch(getApiUrl('/api/certificates?action=next-numbers'), reqInit);
       }
       if (res.ok) {
         const data = await res.json();
@@ -230,7 +236,10 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
       if (isCNoValid) params.append('chassisNumber', cNo);
       if (isENoValid) params.append('engineNumber', eNo);
 
-      fetch(getApiUrl(`/api/certificates/check-vehicle?${params.toString()}`))
+      fetch(getApiUrl(`/api/certificates/check-vehicle?${params.toString()}`), {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      })
         .then((res) => res.json())
         .then((data) => {
           if (data && data.exists) {
@@ -405,9 +414,14 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
         if (res && res.status === 429) {
           throw new Error('Server rate limit reached. Please wait a moment before trying again.');
         }
-        if (res && res.status === 401 && onLogout) {
-          onLogout();
-          throw new Error('Your administrator session has expired. Please sign in again.');
+        if (res && res.status === 401) {
+          const expiredMsg = 'Your administrator session has expired. Please sign in again.';
+          if (onSessionExpired) {
+            onSessionExpired(expiredMsg);
+          } else if (onLogout) {
+            onLogout();
+          }
+          throw new Error(expiredMsg);
         }
         const errorData = await res?.json().catch(() => ({}));
         if (errorData?.isDuplicateVehicle) {

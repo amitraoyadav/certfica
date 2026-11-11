@@ -1,4 +1,39 @@
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+
+let cachedMakerSessionVersion: number | null = null;
+let cachedMakerSessionVersionAt = 0;
+
+export function setCachedMakerSessionVersion(version: number): void {
+  const v = Math.max(1, Number(version) || 1);
+  cachedMakerSessionVersion = v;
+  cachedMakerSessionVersionAt = Date.now();
+}
+
+export function getExpectedMakerSessionVersion(): number {
+  const now = Date.now();
+  if (cachedMakerSessionVersion !== null && now - cachedMakerSessionVersionAt < 2000) {
+    return cachedMakerSessionVersion;
+  }
+  try {
+    const settingsPath = path.join(process.cwd(), 'data', 'settings.json');
+    if (fs.existsSync(settingsPath)) {
+      const raw = fs.readFileSync(settingsPath, 'utf-8');
+      if (raw && raw.trim()) {
+        const parsed = JSON.parse(raw);
+        const ver = Math.max(1, Number(parsed?.makerSessionVersion) || 1);
+        cachedMakerSessionVersion = ver;
+        cachedMakerSessionVersionAt = now;
+        return ver;
+      }
+    }
+  } catch {}
+  if (cachedMakerSessionVersion !== null) {
+    return cachedMakerSessionVersion;
+  }
+  return 1;
+}
 
 function cleanEnvValue(val: string | undefined, fallback = ''): string {
   if (!val) return fallback;
@@ -176,9 +211,10 @@ export function verifyAdminCredentials(
 /**
  * Creates a cryptographically signed HMAC session token for a Certificate Maker
  */
-export function createAdminSessionToken(username = 'pscrappers', sessionVersion = 1): string {
+export function createAdminSessionToken(username = 'pscrappers', sessionVersion?: number): string {
   const timestamp = Date.now();
-  const ver = Math.max(1, Number(sessionVersion) || 1);
+  const resolvedVersion = sessionVersion !== undefined ? sessionVersion : getExpectedMakerSessionVersion();
+  const ver = Math.max(1, Number(resolvedVersion) || 1);
   const userLower = username.toLowerCase();
   if (ver > 1) {
     const payload = `admin:v${ver}:${userLower}:${timestamp}`;
@@ -193,10 +229,15 @@ export function createAdminSessionToken(username = 'pscrappers', sessionVersion 
 /**
  * Validates a Certificate Maker session token against expected sessionVersion
  */
-export function isAdminTokenValid(token?: string, expectedSessionVersion = 1): boolean {
+export function isAdminTokenValid(token?: string, expectedSessionVersion?: number): boolean {
   if (!token || typeof token !== 'string') return false;
   const clean = token.trim();
   if (!clean) return false;
+
+  const resolvedExpectedVersion =
+    expectedSessionVersion !== undefined
+      ? Math.max(1, Number(expectedSessionVersion) || 1)
+      : getExpectedMakerSessionVersion();
 
   if (clean.startsWith('adm.v')) {
     const parts = clean.split('.');
@@ -207,7 +248,7 @@ export function isAdminTokenValid(token?: string, expectedSessionVersion = 1): b
         const timestamp = parseInt(parts[3], 10);
         const providedSig = parts[4];
         if (isNaN(ver) || isNaN(timestamp)) return false;
-        if (ver !== expectedSessionVersion) return false;
+        if (ver !== resolvedExpectedVersion) return false;
         if (Date.now() - timestamp > ADMIN_SESSION_TIMEOUT_MS) return false;
         const payload = `admin:v${ver}:${username}:${timestamp}`;
         const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
@@ -220,7 +261,7 @@ export function isAdminTokenValid(token?: string, expectedSessionVersion = 1): b
   }
 
   if (clean.startsWith('adm.')) {
-    if (expectedSessionVersion > 1) return false;
+    if (resolvedExpectedVersion > 1) return false;
     const parts = clean.split('.');
     if (parts.length === 4) {
       try {
@@ -239,7 +280,7 @@ export function isAdminTokenValid(token?: string, expectedSessionVersion = 1): b
     return false;
   }
 
-  if (expectedSessionVersion === 1 && safeCompare(clean, LEGACY_ADMIN_SESSION_TOKEN)) {
+  if (resolvedExpectedVersion === 1 && safeCompare(clean, LEGACY_ADMIN_SESSION_TOKEN)) {
     return true;
   }
 
@@ -326,8 +367,13 @@ export function extractCoreAdminTokensFromReq(req: any): string[] {
 /**
  * Extracts and verifies whether an incoming HTTP request is authenticated as at least a Certificate Maker
  */
-export function isRequestAdmin(req: any, expectedMakerSessionVersion = 1): boolean {
+export function isRequestAdmin(req: any, expectedMakerSessionVersion?: number): boolean {
   if (!req) return false;
+  const resolvedExpectedVersion =
+    expectedMakerSessionVersion !== undefined
+      ? Math.max(1, Number(expectedMakerSessionVersion) || 1)
+      : getExpectedMakerSessionVersion();
+
   const authHeader = req.headers?.authorization || req.headers?.Authorization;
   const headerToken = req.headers?.['x-admin-token'];
   const coreHeaderToken = req.headers?.['x-main-admin-token'] || req.headers?.['x-core-admin-token'];
@@ -346,7 +392,7 @@ export function isRequestAdmin(req: any, expectedMakerSessionVersion = 1): boole
   ].filter(Boolean);
 
   for (const candidate of candidates) {
-    if (isAdminTokenValid(candidate, expectedMakerSessionVersion) || isMainAdminTokenValid(candidate)) {
+    if (isAdminTokenValid(candidate, resolvedExpectedVersion) || isMainAdminTokenValid(candidate)) {
       return true;
     }
   }

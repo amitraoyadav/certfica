@@ -1095,13 +1095,15 @@ export function configureExpressApp(): express.Application {
     }
 
     const cleanUser = rawUser.toLowerCase();
-    const token = createAdminSessionToken(cleanUser);
+    const makerSessionVer = Number((settings as any).makerSessionVersion) || 1;
+    const token = createAdminSessionToken(cleanUser, makerSessionVer);
     res.setHeader('Set-Cookie', buildSessionCookie('ps_admin_session', token, ADMIN_SESSION_TIMEOUT_MS));
 
     return res.json({
       success: true,
       token,
       role: 'CERTIFICATE_MAKER',
+      makerSessionVersion: makerSessionVer,
       user: { username: cleanUser, role: 'CERTIFICATE_MAKER' },
     });
   });

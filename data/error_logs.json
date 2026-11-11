@@ -1,0 +1,10 @@
+[
+  {
+    "id": "err_1794424453873_2b673750",
+    "timestamp": "2026-11-11T19:14:13.873Z",
+    "category": "AUTH",
+    "severity": "WARNING",
+    "route": "/api/certificates",
+    "message": "Unauthorized certificate creation attempt blocked."
+  }
+]

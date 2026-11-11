@@ -18,11 +18,13 @@ import { PScrapLogo } from './PScrapLogo';
 interface FrontPageLoginProps {
   onLoginSuccess: (token: string, username: string) => void;
   onGoToVerify: () => void;
+  sessionExpiredMessage?: string | null;
 }
 
 export const FrontPageLogin: React.FC<FrontPageLoginProps> = ({
   onLoginSuccess,
   onGoToVerify,
+  sessionExpiredMessage,
 }) => {
   const [username, setUsername] = useState<string>('');
   const [password, setPassword] = useState<string>('');
@@ -169,6 +171,14 @@ export const FrontPageLogin: React.FC<FrontPageLoginProps> = ({
               Secure
             </span>
           </div>
+
+          {/* Session Expired Notice */}
+          {sessionExpiredMessage && !errorMessage && (
+            <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-xl flex items-start gap-2.5 text-xs text-amber-900 font-semibold">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <span>{sessionExpiredMessage}</span>
+            </div>
+          )}
 
           {/* Error Message */}
           {errorMessage && (

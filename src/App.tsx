@@ -46,6 +46,8 @@ export default function App() {
     if (typeof window === 'undefined') return false;
     const hasExplicitlyLoggedOut = sessionStorage.getItem('ps_logged_out') === 'true';
     if (hasExplicitlyLoggedOut) return false;
+    const coreToken = sessionStorage.getItem('ps_core_admin_token') || '';
+    if (coreToken && coreToken.startsWith('ca.')) return true;
     const token =
       localStorage.getItem('ps_admin_token') ||
       localStorage.getItem('pscrappers_admin_token') ||
@@ -57,7 +59,14 @@ export default function App() {
     }
     return Boolean(token && token.startsWith('adm.'));
   });
-  const [isMainAdmin, setIsMainAdmin] = useState<boolean>(false);
+  const [isMainAdmin, setIsMainAdmin] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    const hasExplicitlyLoggedOut = sessionStorage.getItem('ps_logged_out') === 'true';
+    if (hasExplicitlyLoggedOut) return false;
+    const coreToken = sessionStorage.getItem('ps_core_admin_token') || '';
+    return Boolean(coreToken && coreToken.startsWith('ca.'));
+  });
+  const [sessionExpiredMessage, setSessionExpiredMessage] = useState<string | null>(null);
   const [recentMakerCertificates, setRecentMakerCertificates] = useState<Certificate[]>([]);
   const [mainAdminModalOpen, setMainAdminModalOpen] = useState<boolean>(false);
   const [mainAdminPasswordInput, setMainAdminPasswordInput] = useState<string>('');
@@ -82,9 +91,29 @@ export default function App() {
   const [verifyCertNumber, setVerifyCertNumber] = useState<string>('');
   const [verifyToken, setVerifyToken] = useState<string>('');
 
+  const handleSessionExpired = (message?: string) => {
+    sessionStorage.removeItem('ps_core_admin_token');
+    localStorage.removeItem('ps_admin_token');
+    localStorage.removeItem('pscrappers_admin_token');
+    fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => {});
+    setIsAdmin(false);
+    setIsMainAdmin(false);
+    setCertificates([]);
+    setRecentMakerCertificates([]);
+    setStats(null);
+    setSessionExpiredMessage(
+      message || 'Your administrator session has expired. Please sign in again.'
+    );
+    setActiveTab('login');
+    if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/verify')) {
+      window.history.pushState({}, '', '/login');
+    }
+  };
+
   // Fetch certificates and stats safely from backend with strict role isolation
   const fetchData = async (deepSync = false, forceCoreAdminCheck = true) => {
     try {
+      const hasExplicitlyLoggedOut = sessionStorage.getItem('ps_logged_out') === 'true';
       const storedToken =
         localStorage.getItem('ps_admin_token') ||
         localStorage.getItem('pscrappers_admin_token') ||
@@ -99,6 +128,31 @@ export default function App() {
           : {}),
         ...(coreToken ? { 'x-main-admin-token': coreToken } : {}),
       };
+
+      // 0. Verify session status with /api/auth/me when not explicitly logged out
+      if (!hasExplicitlyLoggedOut) {
+        try {
+          const meRes = await fetch('/api/auth/me', {
+            headers: authHeaders,
+            credentials: 'include',
+          });
+          if (meRes.ok) {
+            const meData = await meRes.json();
+            if (meData && meData.authenticated) {
+              setIsAdmin(true);
+              setSessionExpiredMessage(null);
+              if (meData.isMainAdmin || meData.role === 'MAIN_CORE_ADMIN') {
+                setIsMainAdmin(true);
+              }
+            }
+          } else if (meRes.status === 401 && (storedToken || coreToken)) {
+            handleSessionExpired('Your administrator session has expired. Please sign in again.');
+            return;
+          }
+        } catch {
+          // Non-blocking on transient network glitch
+        }
+      }
 
       // 1. Always fetch recent 5 certificates for Certificate Maker view
       try {
@@ -250,9 +304,10 @@ export default function App() {
         return;
       }
 
-      if (storedToken && !hasExplicitlyLoggedOut) {
+      const coreTokenFromStorage = sessionStorage.getItem('ps_core_admin_token') || '';
+      if ((storedToken || coreTokenFromStorage) && !hasExplicitlyLoggedOut) {
         setIsAdmin(true);
-        const hasCoreToken = Boolean(sessionStorage.getItem('ps_core_admin_token'));
+        const hasCoreToken = Boolean(coreTokenFromStorage);
         if (hasCoreToken) {
           setIsMainAdmin(true);
         }
@@ -623,6 +678,7 @@ export default function App() {
     sessionStorage.removeItem('ps_core_admin_token');
     localStorage.setItem('ps_admin_token', token);
     localStorage.setItem('pscrappers_admin_token', token);
+    setSessionExpiredMessage(null);
     setIsAdmin(true);
     setIsMainAdmin(false);
     setCertificates([]);
@@ -640,6 +696,7 @@ export default function App() {
     localStorage.removeItem('ps_admin_token');
     localStorage.removeItem('pscrappers_admin_token');
     fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => {});
+    setSessionExpiredMessage(null);
     setIsAdmin(false);
     setIsMainAdmin(false);
     setCertificates([]);
@@ -742,6 +799,7 @@ export default function App() {
           <FrontPageLogin
             onLoginSuccess={handleLoginSuccess}
             onGoToVerify={() => handleSelectTab('verify')}
+            sessionExpiredMessage={sessionExpiredMessage}
           />
         )}
 
@@ -761,6 +819,7 @@ export default function App() {
               }
             }}
             onLogout={handleLogout}
+            onSessionExpired={handleSessionExpired}
             onViewExistingCertificate={handleViewByCertNumber}
             onRequestReissue={(cert) => setReissueModalCert(cert)}
             recentCertificates={recentMakerCertificates}

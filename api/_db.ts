@@ -18,6 +18,7 @@ import {
   verifyCoreAdminToken,
   extractCoreAdminTokensFromReq,
   safeCompare,
+  setCachedMakerSessionVersion,
 } from './_auth.js';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
@@ -1056,16 +1057,40 @@ export async function getDatabaseCertificatesAsync(): Promise<Certificate[]> {
   return baseline;
 }
 
+let inMemorySettings: SystemSettings | null = null;
+
 export function getDatabaseSettings(): SystemSettings {
+  let diskSettings: SystemSettings | null = null;
   try {
     if (fs.existsSync(SETTINGS_FILE)) {
       const raw = fs.readFileSync(SETTINGS_FILE, 'utf-8');
       if (raw && raw.trim()) {
         const parsed = JSON.parse(raw);
-        return { ...DEFAULT_SETTINGS, ...parsed };
+        diskSettings = { ...DEFAULT_SETTINGS, ...parsed };
       }
     }
   } catch {}
+
+  if (inMemorySettings && diskSettings) {
+    const memVer = Number((inMemorySettings as any).makerSessionVersion) || 1;
+    const diskVer = Number((diskSettings as any).makerSessionVersion) || 1;
+    const chosen = diskVer > memVer ? { ...inMemorySettings, ...diskSettings } : { ...diskSettings, ...inMemorySettings };
+    inMemorySettings = chosen;
+    setCachedMakerSessionVersion(Number((chosen as any).makerSessionVersion) || 1);
+    return chosen;
+  }
+
+  if (diskSettings) {
+    inMemorySettings = diskSettings;
+    setCachedMakerSessionVersion(Number((diskSettings as any).makerSessionVersion) || 1);
+    return diskSettings;
+  }
+
+  if (inMemorySettings) {
+    setCachedMakerSessionVersion(Number((inMemorySettings as any).makerSessionVersion) || 1);
+    return inMemorySettings;
+  }
+
   return { ...DEFAULT_SETTINGS };
 }
 
@@ -1079,6 +1104,8 @@ export function getSanitizedSettings(): Omit<SystemSettings, 'adminPasswordHash'
 }
 
 export function saveDatabaseSettings(settings: SystemSettings): void {
+  inMemorySettings = { ...settings };
+  setCachedMakerSessionVersion(Number((settings as any).makerSessionVersion) || 1);
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -1566,6 +1593,86 @@ export async function changeCoreAdminPasswordServer(
   };
 }
 
+let lastMakerCredsSyncAt = 0;
+
+/**
+ * Synchronizes Certificate Maker credentials (`adminPasswordHash` and `makerSessionVersion`)
+ * from Firestore `/settings/maker_credentials` into local/in-memory settings so that
+ * Vercel Serverless instances always validate against the latest rotated Maker session version.
+ */
+export async function getMakerCredentialsServer(forceRefresh = false): Promise<SystemSettings> {
+  const localSettings: any = getDatabaseSettings();
+  const now = Date.now();
+  if (!forceRefresh && lastMakerCredsSyncAt > 0 && now - lastMakerCredsSyncAt < 30000) {
+    return localSettings;
+  }
+  if (now < firestoreQuotaCooldownUntil) {
+    return localSettings;
+  }
+
+  // 1. Try Firebase Admin SDK
+  const adminDb = getFirebaseAdminDb();
+  if (adminDb) {
+    try {
+      const snap = await adminDb.collection('settings').doc('maker_credentials').get();
+      if (snap.exists) {
+        const data = snap.data();
+        const fsHash = typeof data?.passwordHash === 'string' ? data.passwordHash : data?.adminPasswordHash;
+        const fsVer = Number(data?.makerSessionVersion) || 1;
+        const localVer = Number(localSettings.makerSessionVersion) || 1;
+        lastMakerCredsSyncAt = now;
+        if (fsHash && fsHash.startsWith('scrypt$') && fsVer >= localVer) {
+          const merged: any = {
+            ...localSettings,
+            adminUsername: data?.adminUsername || localSettings.adminUsername || 'pscrappers',
+            adminPasswordHash: fsHash,
+            makerSessionVersion: fsVer,
+          };
+          inMemorySettings = merged;
+          setCachedMakerSessionVersion(fsVer);
+          return merged;
+        }
+        return localSettings;
+      }
+    } catch {}
+  }
+
+  // 2. Try Firestore REST API (`/settings/maker_credentials`)
+  const cfg = getFirebaseServerConfig();
+  const token = await getFirestoreAccessToken().catch(() => null);
+  if (token || cfg.apiKey) {
+    try {
+      const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+      const keyParam = !token && cfg.apiKey ? `?key=${encodeURIComponent(cfg.apiKey)}` : '';
+      const docUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents/settings/maker_credentials${keyParam}`;
+      const res = await fetch(docUrl, { headers: authHeaders });
+      if (res.status === 429) {
+        firestoreQuotaCooldownUntil = Date.now() + 15 * 60 * 1000;
+      } else if (res.ok) {
+        const docJson: any = await res.json();
+        const parsed = fromFirestoreDocument(docJson);
+        const fsHash = typeof parsed?.passwordHash === 'string' ? parsed.passwordHash : parsed?.adminPasswordHash;
+        const fsVer = Number(parsed?.makerSessionVersion) || 1;
+        const localVer = Number(localSettings.makerSessionVersion) || 1;
+        lastMakerCredsSyncAt = now;
+        if (fsHash && fsHash.startsWith('scrypt$') && fsVer >= localVer) {
+          const merged: any = {
+            ...localSettings,
+            adminUsername: parsed?.adminUsername || localSettings.adminUsername || 'pscrappers',
+            adminPasswordHash: fsHash,
+            makerSessionVersion: fsVer,
+          };
+          inMemorySettings = merged;
+          setCachedMakerSessionVersion(fsVer);
+          return merged;
+        }
+      }
+    } catch {}
+  }
+
+  return localSettings;
+}
+
 /**
  * Rotates the Certificate Maker password securely (restricted to MAIN_CORE_ADMIN):
  * - Verifies current Maker password
@@ -1611,7 +1718,7 @@ export async function changeMakerPasswordServer(
     };
   }
 
-  const currentSettings: any = getDatabaseSettings();
+  const currentSettings: any = await getMakerCredentialsServer(true);
   const validOld = verifyAdminCredentials(currentSettings.adminUsername || 'pscrappers', cleanOld, currentSettings);
   if (!validOld) {
     return {

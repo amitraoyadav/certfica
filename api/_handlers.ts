@@ -17,6 +17,7 @@ import {
   authenticateCoreAdminPassword,
   changeCoreAdminPasswordServer,
   changeMakerPasswordServer,
+  getMakerCredentialsServer,
   isRequestCoreAdminAsync,
   getPersistentIdempotencyAsync,
   savePersistentIdempotencyAsync,
@@ -155,6 +156,15 @@ export async function handleApiRequest(req: any, res: any) {
     });
   }
 
+  const currentMakerSettings: any =
+    pathname.startsWith('/api/auth/') ||
+    pathname === '/api/certificates' ||
+    pathname === '/api/certificates/recent' ||
+    pathname.startsWith('/api/certificates/')
+      ? await getMakerCredentialsServer(pathname === '/api/auth/login')
+      : getDatabaseSettings();
+  const makerVer = Number(currentMakerSettings?.makerSessionVersion) || 1;
+
   // ----------------------------------------------------
   // 2. Auth: /api/auth/login (Server-side verification + HttpOnly cookie)
   // ----------------------------------------------------
@@ -171,7 +181,7 @@ export async function handleApiRequest(req: any, res: any) {
       });
     }
 
-    const settings: any = getDatabaseSettings();
+    const settings: any = currentMakerSettings;
     if (!verifyAdminCredentials(rawUser, rawPass, settings)) {
       return res.status(401).json({
         success: false,
@@ -201,7 +211,6 @@ export async function handleApiRequest(req: any, res: any) {
   // 3. Auth: /api/auth/me
   // ----------------------------------------------------
   if (pathname === '/api/auth/me' && method === 'GET') {
-    const makerVer = Number((getDatabaseSettings() as any).makerSessionVersion) || 1;
     const isMaker = isRequestAdmin(req, makerVer);
     const isCore = await isRequestCoreAdminAsync(req);
     if (!isMaker && !isCore) {
@@ -223,7 +232,6 @@ export async function handleApiRequest(req: any, res: any) {
   // 4. Auth: /api/auth/main-admin-status
   // ----------------------------------------------------
   if (pathname === '/api/auth/main-admin-status' && method === 'GET') {
-    const makerVer = Number((getDatabaseSettings() as any).makerSessionVersion) || 1;
     const isCore = await isRequestCoreAdminAsync(req);
     const isMaker = isRequestAdmin(req, makerVer);
     return res.status(200).json({
@@ -358,7 +366,7 @@ export async function handleApiRequest(req: any, res: any) {
     if (method === 'PUT') {
       const isCore = await isRequestCoreAdminAsync(req);
       if (!isCore) {
-        return res.status(isRequestAdmin(req) ? 403 : 401).json({
+        return res.status(isRequestAdmin(req, makerVer) ? 403 : 401).json({
           message: 'Main Core Admin authentication required to modify system settings.',
         });
       }
@@ -382,7 +390,7 @@ export async function handleApiRequest(req: any, res: any) {
   // ----------------------------------------------------
   if (pathname === '/api/migration/firestore-status' && method === 'GET') {
     if (!(await isRequestCoreAdminAsync(req))) {
-      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+      return res.status(isRequestAdmin(req, makerVer) ? 403 : 401).json({
         message: 'Main Core Admin authentication required.',
       });
     }
@@ -396,7 +404,7 @@ export async function handleApiRequest(req: any, res: any) {
 
   if (pathname === '/api/migration/read-live' && method === 'POST') {
     if (!(await isRequestCoreAdminAsync(req))) {
-      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+      return res.status(isRequestAdmin(req, makerVer) ? 403 : 401).json({
         message: 'Main Core Admin authentication required for migration operations.',
       });
     }
@@ -524,7 +532,7 @@ export async function handleApiRequest(req: any, res: any) {
       (pathname === '/api/certificates' && (query.recent === 'true' || query.scope === 'recent'))) &&
     method === 'GET'
   ) {
-    const isMaker = isRequestAdmin(req);
+    const isMaker = isRequestAdmin(req, makerVer);
     const isCore = await isRequestCoreAdminAsync(req);
     if (!isMaker && !isCore) {
       return res.status(401).json({
@@ -541,7 +549,7 @@ export async function handleApiRequest(req: any, res: any) {
   if (pathname === '/api/stats' && method === 'GET') {
     const isCore = await isRequestCoreAdminAsync(req);
     if (!isCore) {
-      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+      return res.status(isRequestAdmin(req, makerVer) ? 403 : 401).json({
         message:
           'Main Core Admin access required to view full database statistics and total certificate counts.',
       });
@@ -661,7 +669,7 @@ export async function handleApiRequest(req: any, res: any) {
     if (method === 'GET') {
       const isCore = await isRequestCoreAdminAsync(req);
       if (!isCore) {
-        return res.status(isRequestAdmin(req) ? 403 : 401).json({
+        return res.status(isRequestAdmin(req, makerVer) ? 403 : 401).json({
           message:
             'Main Core Admin access required to view or search the complete certificate database.',
         });
@@ -717,7 +725,9 @@ export async function handleApiRequest(req: any, res: any) {
     const certs = await getDatabaseCertificatesAsync();
 
     if (method === 'POST') {
-      if (!isRequestAdmin(req)) {
+      const isMaker = isRequestAdmin(req, makerVer);
+      const isCore = await isRequestCoreAdminAsync(req);
+      if (!isMaker && !isCore) {
         recordSystemError('AUTH', 'Unauthorized certificate creation attempt blocked.', 'WARNING', '/api/certificates');
         return res.status(401).json({
           message: 'Administrator authentication required to generate certificates.',
@@ -905,7 +915,7 @@ export async function handleApiRequest(req: any, res: any) {
       (subPath.endsWith('/status') || subPath.endsWith('/cancel') || subPath.endsWith('/protected-action')) &&
       (method === 'PATCH' || method === 'POST')
     ) {
-      if (!isRequestAdmin(req)) {
+      if (!isRequestAdmin(req, makerVer) && !(await isRequestCoreAdminAsync(req))) {
         return res.status(401).json({ message: 'Administrator login required.' });
       }
       const providedPassword =
@@ -976,7 +986,7 @@ export async function handleApiRequest(req: any, res: any) {
     }
 
     if (method === 'PUT' && certIndex >= 0) {
-      if (!isRequestAdmin(req)) {
+      if (!isRequestAdmin(req, makerVer) && !(await isRequestCoreAdminAsync(req))) {
         return res.status(401).json({ message: 'Administrator login required.' });
       }
       const providedPassword =
@@ -1036,7 +1046,7 @@ export async function handleApiRequest(req: any, res: any) {
     method === 'POST'
   ) {
     if (!(await isRequestCoreAdminAsync(req))) {
-      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+      return res.status(isRequestAdmin(req, makerVer) ? 403 : 401).json({
         message: 'Main Core Admin access required for full database synchronization.',
       });
     }
@@ -1053,7 +1063,7 @@ export async function handleApiRequest(req: any, res: any) {
 
   if (pathname === '/api/integrity-check' || pathname === '/api/audit/verify-all') {
     if (!(await isRequestCoreAdminAsync(req))) {
-      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+      return res.status(isRequestAdmin(req, makerVer) ? 403 : 401).json({
         message: 'Main Core Admin access required for database integrity audit.',
       });
     }
@@ -1074,7 +1084,7 @@ export async function handleApiRequest(req: any, res: any) {
 
   if (pathname === '/api/migration/status' && method === 'GET') {
     if (!(await isRequestCoreAdminAsync(req))) {
-      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+      return res.status(isRequestAdmin(req, makerVer) ? 403 : 401).json({
         message: 'Main Core Admin access required.',
       });
     }
@@ -1129,7 +1139,7 @@ export async function handleApiRequest(req: any, res: any) {
   // ----------------------------------------------------
   if (pathname === '/api/backups' && method === 'GET') {
     if (!(await isRequestCoreAdminAsync(req))) {
-      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+      return res.status(isRequestAdmin(req, makerVer) ? 403 : 401).json({
         message: 'Main Core Admin access required.',
       });
     }
@@ -1294,7 +1304,7 @@ export async function handleApiRequest(req: any, res: any) {
 
   if (pathname === '/api/backups/create' && method === 'POST') {
     if (!(await isRequestCoreAdminAsync(req))) {
-      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+      return res.status(isRequestAdmin(req, makerVer) ? 403 : 401).json({
         message: 'Main Core Admin access required.',
       });
     }
@@ -1344,7 +1354,7 @@ export async function handleApiRequest(req: any, res: any) {
   // 17b. Isolated Disaster Recovery Test Restoration (Never touches production, strips synthetic test records)
   if (pathname === '/api/backups/test-restore' && method === 'POST') {
     if (!(await isRequestCoreAdminAsync(req))) {
-      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+      return res.status(isRequestAdmin(req, makerVer) ? 403 : 401).json({
         message: 'Main Core Admin access required.',
       });
     }
@@ -1437,7 +1447,7 @@ export async function handleApiRequest(req: any, res: any) {
   // 17c. Additive Backup Restore (Never overwrites existing, strictly blocks synthetic test records)
   if (pathname === '/api/backups/restore' && method === 'POST') {
     if (!(await isRequestCoreAdminAsync(req))) {
-      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+      return res.status(isRequestAdmin(req, makerVer) ? 403 : 401).json({
         message: 'Main Core Admin access required.',
       });
     }
@@ -1522,7 +1532,7 @@ export async function handleApiRequest(req: any, res: any) {
   // ----------------------------------------------------
   if (pathname === '/api/platform/health-and-storage' && method === 'GET') {
     if (!(await isRequestCoreAdminAsync(req))) {
-      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+      return res.status(isRequestAdmin(req, makerVer) ? 403 : 401).json({
         message: 'Main Core Admin access required.',
       });
     }
@@ -1624,7 +1634,7 @@ export async function handleApiRequest(req: any, res: any) {
   // ----------------------------------------------------
   if (pathname === '/api/system/health-checks' && method === 'GET') {
     if (!(await isRequestCoreAdminAsync(req))) {
-      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+      return res.status(isRequestAdmin(req, makerVer) ? 403 : 401).json({
         message: 'Main Core Admin access required.',
       });
     }
@@ -1764,7 +1774,7 @@ export async function handleApiRequest(req: any, res: any) {
 
     // Check 10: Administrative Role Separation
     const t10 = Date.now();
-    const makerToken = isRequestAdmin(req);
+    const makerToken = isRequestAdmin(req, makerVer);
     checks.push({
       id: 10,
       name: 'Role Separation & Privilege Escalation Guard',
@@ -1788,7 +1798,7 @@ export async function handleApiRequest(req: any, res: any) {
   // ----------------------------------------------------
   if (pathname === '/api/system/errors' && method === 'GET') {
     if (!(await isRequestCoreAdminAsync(req))) {
-      return res.status(isRequestAdmin(req) ? 403 : 401).json({
+      return res.status(isRequestAdmin(req, makerVer) ? 403 : 401).json({
         message: 'Main Core Admin access required.',
       });
     }
