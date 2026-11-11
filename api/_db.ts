@@ -345,16 +345,26 @@ let firestoreCertsCache: { certs: Certificate[]; fetchedAt: number } | null = nu
 let inFlightFirestoreCertsPromise: Promise<Certificate[] | null> | null = null;
 let firestoreQuotaCooldownUntil = 0;
 
+const inMemoryIdempotencyMap = new Map<string, { certificate: Certificate; timestamp: number }>();
+
 export function invalidateFirestoreCache(updatedOrNewCert?: Certificate): void {
-  if (updatedOrNewCert && firestoreCertsCache && Array.isArray(firestoreCertsCache.certs)) {
+  if (updatedOrNewCert) {
     const normNo = String(updatedOrNewCert.certificateNumber || '').trim().toUpperCase();
-    const filtered = firestoreCertsCache.certs.filter(
-      (c) => String(c.certificateNumber || '').trim().toUpperCase() !== normNo && c.id !== updatedOrNewCert.id
-    );
-    firestoreCertsCache = {
-      certs: [updatedOrNewCert, ...filtered],
-      fetchedAt: Date.now(),
-    };
+    if (firestoreCertsCache && Array.isArray(firestoreCertsCache.certs)) {
+      const filtered = firestoreCertsCache.certs.filter(
+        (c) => String(c.certificateNumber || '').trim().toUpperCase() !== normNo && c.id !== updatedOrNewCert.id
+      );
+      firestoreCertsCache = {
+        certs: [updatedOrNewCert, ...filtered],
+        fetchedAt: Date.now(),
+      };
+    }
+    if (inMemoryCertificates && Array.isArray(inMemoryCertificates)) {
+      const filteredMem = inMemoryCertificates.filter(
+        (c) => String(c.certificateNumber || '').trim().toUpperCase() !== normNo && c.id !== updatedOrNewCert.id
+      );
+      inMemoryCertificates = [updatedOrNewCert, ...filteredMem];
+    }
     return;
   }
   firestoreCertsCache = null;
@@ -364,11 +374,15 @@ export function invalidateFirestoreCache(updatedOrNewCert?: Certificate): void {
 export async function commitCertificateToFirestoreServer(
   newCertificate: Certificate,
   nextCertSeq: number,
-  nextScrapSeq: number
+  nextScrapSeq: number,
+  idempotencyKey?: string
 ): Promise<boolean> {
   const cfg = getFirebaseServerConfig();
   const certDocKey = newCertificate.certificateNumber.replace(/[^a-zA-Z0-9_\-]/g, '_').toUpperCase();
   const scrapDocKey = newCertificate.scrappingRegistrationNumber.replace(/[^a-zA-Z0-9_\-]/g, '_').toUpperCase();
+  const cleanIdempKey = idempotencyKey
+    ? idempotencyKey.trim().replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 128)
+    : '';
   const now = new Date().toISOString();
   const auditId = `audit_issue_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
 
@@ -381,12 +395,24 @@ export async function commitCertificateToFirestoreServer(
       const resScrapRef = adminDb.collection('reserved_scrapping_numbers').doc(scrapDocKey);
       const settingsRef = adminDb.collection('settings').doc('system');
       const auditRef = adminDb.collection('audit_logs').doc(auditId);
+      const idempRef = cleanIdempKey ? adminDb.collection('idempotency_keys').doc(cleanIdempKey) : null;
 
-      const [certSnap, resCertSnap, resScrapSnap] = await Promise.all([
+      // Firestore transaction rule: ALL reads must execute before ANY writes
+      const [certSnap, resCertSnap, resScrapSnap, idempSnap] = await Promise.all([
         tx.get(certRef),
         tx.get(resCertRef),
         tx.get(resScrapRef),
+        idempRef ? tx.get(idempRef) : Promise.resolve(null),
       ]);
+
+      if (idempSnap && idempSnap.exists) {
+        const existingCert = idempSnap.data()?.certificate as Certificate | undefined;
+        if (existingCert) {
+          const idempErr: any = new Error('IDEMPOTENT_ALREADY_COMMITTED');
+          idempErr.idempotentCertificate = existingCert;
+          throw idempErr;
+        }
+      }
 
       if (certSnap.exists || resCertSnap.exists) {
         throw new Error(`Certificate number ${newCertificate.certificateNumber} is already reserved or issued.`);
@@ -433,7 +459,20 @@ export async function commitCertificateToFirestoreServer(
         timestamp: now,
         serverWriteToken: SERVER_WRITE_TOKEN,
       });
+      if (idempRef && cleanIdempKey) {
+        tx.create(idempRef, {
+          idempotencyKey: cleanIdempKey,
+          certificateId: newCertificate.id,
+          certificateNumber: newCertificate.certificateNumber,
+          certificate: newCertificate,
+          createdAt: now,
+          expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        });
+      }
     });
+    if (cleanIdempKey) {
+      inMemoryIdempotencyMap.set(cleanIdempKey, { certificate: newCertificate, timestamp: Date.now() });
+    }
     invalidateFirestoreCache(newCertificate);
     return true;
   }
@@ -447,7 +486,7 @@ export async function commitCertificateToFirestoreServer(
   const keyParam = !token && cfg.apiKey ? `?key=${encodeURIComponent(cfg.apiKey)}` : '';
   const commitUrl = `https://firestore.googleapis.com/v1/${dbRoot}:commit${keyParam}`;
 
-  const writes = [
+  const writes: any[] = [
     {
       update: {
         name: `${dbRoot}/certificates/${newCertificate.id}`,
@@ -494,6 +533,16 @@ export async function commitCertificateToFirestoreServer(
           serverWriteToken: SERVER_WRITE_TOKEN,
         }),
       },
+      updateMask: {
+        fieldPaths: [
+          'certificatePrefix',
+          'certificateNextSeq',
+          'scrappingPrefix',
+          'scrappingNextSeq',
+          'updatedAt',
+          'serverWriteToken',
+        ],
+      },
     },
     {
       update: {
@@ -513,6 +562,23 @@ export async function commitCertificateToFirestoreServer(
     },
   ];
 
+  if (cleanIdempKey) {
+    writes.push({
+      update: {
+        name: `${dbRoot}/idempotency_keys/${cleanIdempKey}`,
+        fields: toFirestoreFields({
+          idempotencyKey: cleanIdempKey,
+          certificateId: newCertificate.id,
+          certificateNumber: newCertificate.certificateNumber,
+          certificate: newCertificate,
+          createdAt: now,
+          expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        }),
+      },
+      currentDocument: { exists: false },
+    });
+  }
+
   const res = await fetch(commitUrl, {
     method: 'POST',
     headers: {
@@ -520,13 +586,17 @@ export async function commitCertificateToFirestoreServer(
       ...authHeaders,
     },
     body: JSON.stringify({ writes }),
+    signal: AbortSignal.timeout(8000),
   });
 
   if (!res.ok) {
     const errBody = await res.text();
     throw new Error(`Firestore atomic commit failed (${res.status}): ${errBody}`);
   }
-  invalidateFirestoreCache();
+  if (cleanIdempKey) {
+    inMemoryIdempotencyMap.set(cleanIdempKey, { certificate: newCertificate, timestamp: Date.now() });
+  }
+  invalidateFirestoreCache(newCertificate);
   return true;
 }
 
@@ -600,6 +670,13 @@ export async function fetchCertificatesFromFirestoreServer(forceRefresh = false)
   if (!forceRefresh && firestoreCertsCache && Date.now() - firestoreCertsCache.fetchedAt < 300000) {
     return firestoreCertsCache.certs;
   }
+  // Stale-while-revalidate: if cache exists and is slightly stale (>5 min), return cached records immediately and refresh in background
+  if (!forceRefresh && firestoreCertsCache && firestoreCertsCache.certs.length >= 938) {
+    if (!inFlightFirestoreCertsPromise) {
+      fetchCertificatesFromFirestoreServer(true).catch(() => {});
+    }
+    return firestoreCertsCache.certs;
+  }
   if (Date.now() < firestoreQuotaCooldownUntil) {
     const fallbackCerts = firestoreCertsCache?.certs || getDatabaseCertificates();
     firestoreCertsCache = { certs: fallbackCerts, fetchedAt: Date.now() };
@@ -621,6 +698,7 @@ export async function fetchCertificatesFromFirestoreServer(forceRefresh = false)
           return data as Certificate;
         });
         firestoreCertsCache = { certs, fetchedAt: Date.now() };
+        inMemoryCertificates = certs;
         return certs;
       }
 
@@ -641,6 +719,7 @@ export async function fetchCertificatesFromFirestoreServer(forceRefresh = false)
               limit: 2000,
             },
           }),
+          signal: AbortSignal.timeout(6000),
         });
         if (res.status === 429) {
           firestoreQuotaCooldownUntil = Date.now() + 15 * 60 * 1000;
@@ -1058,40 +1137,29 @@ export async function getDatabaseCertificatesAsync(): Promise<Certificate[]> {
 }
 
 let inMemorySettings: SystemSettings | null = null;
+let inMemoryReservedNumbers: { certificateNumbers: string[]; scrappingNumbers: string[] } | null = null;
 
 export function getDatabaseSettings(): SystemSettings {
-  let diskSettings: SystemSettings | null = null;
-  try {
-    if (fs.existsSync(SETTINGS_FILE)) {
-      const raw = fs.readFileSync(SETTINGS_FILE, 'utf-8');
-      if (raw && raw.trim()) {
-        const parsed = JSON.parse(raw);
-        diskSettings = { ...DEFAULT_SETTINGS, ...parsed };
-      }
-    }
-  } catch {}
-
-  if (inMemorySettings && diskSettings) {
-    const memVer = Number((inMemorySettings as any).makerSessionVersion) || 1;
-    const diskVer = Number((diskSettings as any).makerSessionVersion) || 1;
-    const chosen = diskVer > memVer ? { ...inMemorySettings, ...diskSettings } : { ...diskSettings, ...inMemorySettings };
-    inMemorySettings = chosen;
-    setCachedMakerSessionVersion(Number((chosen as any).makerSessionVersion) || 1);
-    return chosen;
-  }
-
-  if (diskSettings) {
-    inMemorySettings = diskSettings;
-    setCachedMakerSessionVersion(Number((diskSettings as any).makerSessionVersion) || 1);
-    return diskSettings;
-  }
-
   if (inMemorySettings) {
     setCachedMakerSessionVersion(Number((inMemorySettings as any).makerSessionVersion) || 1);
     return inMemorySettings;
   }
 
-  return { ...DEFAULT_SETTINGS };
+  try {
+    if (fs.existsSync(SETTINGS_FILE)) {
+      const raw = fs.readFileSync(SETTINGS_FILE, 'utf-8');
+      if (raw && raw.trim()) {
+        const parsed = JSON.parse(raw);
+        inMemorySettings = { ...DEFAULT_SETTINGS, ...parsed };
+        setCachedMakerSessionVersion(Number((inMemorySettings as any).makerSessionVersion) || 1);
+        return inMemorySettings;
+      }
+    }
+  } catch {}
+
+  inMemorySettings = { ...DEFAULT_SETTINGS };
+  setCachedMakerSessionVersion(Number((inMemorySettings as any).makerSessionVersion) || 1);
+  return inMemorySettings;
 }
 
 export function getSanitizedSettings(): Omit<SystemSettings, 'adminPasswordHash'> {
@@ -1103,54 +1171,79 @@ export function getSanitizedSettings(): Omit<SystemSettings, 'adminPasswordHash'
   return copy;
 }
 
+const mirrorWriteQueues = new Map<string, Promise<void>>();
+let mirrorWriteSeq = 0;
+
+/**
+ * Serializes asynchronous local mirror writes per file using a FIFO promise queue,
+ * latest-state evaluation at write execution time, and atomic temp-file write + rename.
+ * Guarantees that concurrent or rapid updates never overwrite newer data with older data
+ * and never leave partially written JSON files on disk.
+ */
+function enqueueAtomicMirrorWrite(filePath: string, getLatestState: () => any): void {
+  const prev = mirrorWriteQueues.get(filePath) || Promise.resolve();
+  const next = prev
+    .catch(() => {})
+    .then(async () => {
+      const latestData = getLatestState();
+      if (latestData === undefined || latestData === null) return;
+      const serialized = JSON.stringify(latestData, null, 2);
+      const tmpPath = `${filePath}.tmp.${process.pid}.${++mirrorWriteSeq}`;
+      try {
+        await fs.promises.mkdir(DATA_DIR, { recursive: true });
+        await fs.promises.writeFile(tmpPath, serialized, 'utf-8');
+        await fs.promises.rename(tmpPath, filePath);
+      } catch (err) {
+        try {
+          await fs.promises.unlink(tmpPath);
+        } catch {}
+        console.warn(`[DB] Atomic mirror write notice (${path.basename(filePath)}):`, err);
+      }
+    });
+  mirrorWriteQueues.set(filePath, next);
+}
+
 export function saveDatabaseSettings(settings: SystemSettings): void {
   inMemorySettings = { ...settings };
   setCachedMakerSessionVersion(Number((settings as any).makerSessionVersion) || 1);
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf-8');
-  } catch (err) {
-    console.warn('[DB] Settings write notice:', err);
-  }
+  enqueueAtomicMirrorWrite(SETTINGS_FILE, () => inMemorySettings);
 }
 
 export function getReservedNumbers(): { certificateNumbers: string[]; scrappingNumbers: string[] } {
+  if (inMemoryReservedNumbers) {
+    return inMemoryReservedNumbers;
+  }
   try {
     if (fs.existsSync(RESERVED_NUMBERS_FILE)) {
       const raw = fs.readFileSync(RESERVED_NUMBERS_FILE, 'utf-8');
       if (raw && raw.trim()) {
         const parsed = JSON.parse(raw);
-        return {
+        inMemoryReservedNumbers = {
           certificateNumbers: Array.isArray(parsed.certificateNumbers) ? parsed.certificateNumbers : [],
           scrappingNumbers: Array.isArray(parsed.scrappingNumbers) ? parsed.scrappingNumbers : [],
         };
+        return inMemoryReservedNumbers;
       }
     }
   } catch {}
-  return { certificateNumbers: [], scrappingNumbers: [] };
+  inMemoryReservedNumbers = { certificateNumbers: [], scrappingNumbers: [] };
+  return inMemoryReservedNumbers;
 }
 
 export function saveReservedNumbers(reserved: { certificateNumbers: string[]; scrappingNumbers: string[] }): void {
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    fs.writeFileSync(RESERVED_NUMBERS_FILE, JSON.stringify(reserved, null, 2), 'utf-8');
-  } catch {}
+  inMemoryReservedNumbers = {
+    certificateNumbers: [...(reserved.certificateNumbers || [])],
+    scrappingNumbers: [...(reserved.scrappingNumbers || [])],
+  };
+  enqueueAtomicMirrorWrite(RESERVED_NUMBERS_FILE, () => inMemoryReservedNumbers);
 }
 
 export function saveDatabaseCertificates(certs: Certificate[]): void {
   inMemoryCertificates = certs;
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    fs.writeFileSync(CERTIFICATES_FILE, JSON.stringify(certs, null, 2), 'utf-8');
-  } catch (err) {
-    console.warn('[DB] Persistent filesystem write notice (in-memory updated):', err);
+  if (firestoreCertsCache) {
+    firestoreCertsCache = { certs, fetchedAt: Date.now() };
   }
+  enqueueAtomicMirrorWrite(CERTIFICATES_FILE, () => inMemoryCertificates);
 }
 
 /**
@@ -1173,10 +1266,13 @@ export function getNextSequentialNumbers(
 ): {
   candidateCertNo: string;
   candidateScrapNo: string;
+  certificateNumber: string;
+  scrappingNumber: string;
   nextCertSeq: number;
   nextScrapSeq: number;
 } {
   const s = settings || getDatabaseSettings();
+  const resNums = reserved || getReservedNumbers();
   const certPrefix = s.certificatePrefix || 'PS/26/R';
   const scrapPrefix = s.scrappingPrefix || 'REG-C';
 
@@ -1217,13 +1313,13 @@ export function getNextSequentialNumbers(
     }
   }
 
-  for (const r of reserved?.certificateNumbers || []) {
+  for (const r of resNums.certificateNumbers || []) {
     if (!r) continue;
     const upper = r.trim().toUpperCase();
     existingCertSet.add(upper);
   }
 
-  for (const r of reserved?.scrappingNumbers || []) {
+  for (const r of resNums.scrappingNumbers || []) {
     if (!r) continue;
     const upper = r.trim().toUpperCase();
     existingScrapSet.add(upper);
@@ -1256,6 +1352,8 @@ export function getNextSequentialNumbers(
   return {
     candidateCertNo,
     candidateScrapNo,
+    certificateNumber: candidateCertNo,
+    scrappingNumber: candidateScrapNo,
     nextCertSeq: Math.max(maxCertSeq + 1, 1000842),
     nextScrapSeq: Math.max(maxScrapSeq + 1, 273682),
   };
@@ -1594,6 +1692,7 @@ export async function changeCoreAdminPasswordServer(
 }
 
 let lastMakerCredsSyncAt = 0;
+let inFlightMakerCredsPromise: Promise<SystemSettings> | null = null;
 
 /**
  * Synchronizes Certificate Maker credentials (`adminPasswordHash` and `makerSessionVersion`)
@@ -1603,7 +1702,15 @@ let lastMakerCredsSyncAt = 0;
 export async function getMakerCredentialsServer(forceRefresh = false): Promise<SystemSettings> {
   const localSettings: any = getDatabaseSettings();
   const now = Date.now();
-  if (!forceRefresh && lastMakerCredsSyncAt > 0 && now - lastMakerCredsSyncAt < 30000) {
+  if (!forceRefresh && lastMakerCredsSyncAt > 0 && now - lastMakerCredsSyncAt < 300000) {
+    return localSettings;
+  }
+  if (!forceRefresh && lastMakerCredsSyncAt > 0) {
+    if (!inFlightMakerCredsPromise) {
+      inFlightMakerCredsPromise = getMakerCredentialsServer(true).finally(() => {
+        inFlightMakerCredsPromise = null;
+      });
+    }
     return localSettings;
   }
   if (now < firestoreQuotaCooldownUntil) {
@@ -1842,7 +1949,10 @@ export function computeCanonicalHash(cert: {
 /**
  * Creates and persists a certificate atomically with mutex locking and PostgreSQL transaction support
  */
-export async function createAndSaveCertificateRecordAsync(payload: any): Promise<Certificate> {
+export async function createAndSaveCertificateRecordAsync(
+  payload: any,
+  idempotencyKey?: string
+): Promise<Certificate> {
   if (!isLiveCertificateIssuanceEnabled()) {
     const lockErr: any = new Error(
       'Read-Only Verification Mode Active: Live certificate issuance is temporarily locked until database and security checks pass and are approved.'
@@ -1850,9 +1960,35 @@ export async function createAndSaveCertificateRecordAsync(payload: any): Promise
     lockErr.statusCode = 423;
     throw lockErr;
   }
+  const cleanIdempKey = idempotencyKey
+    ? idempotencyKey.trim().replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 128)
+    : '';
+  if (cleanIdempKey) {
+    const memHit = inMemoryIdempotencyMap.get(cleanIdempKey);
+    if (memHit && Date.now() - memHit.timestamp < 10 * 60 * 1000) {
+      return memHit.certificate;
+    }
+  }
+
   const release = await dbCreationMutex.acquire();
   try {
-    const certs = await getDatabaseCertificatesAsync();
+    if (cleanIdempKey) {
+      const memHit = inMemoryIdempotencyMap.get(cleanIdempKey);
+      if (memHit && Date.now() - memHit.timestamp < 10 * 60 * 1000) {
+        return memHit.certificate;
+      }
+    }
+
+    const [certs, persistentIdemp] = await Promise.all([
+      getDatabaseCertificatesAsync(),
+      cleanIdempKey ? getPersistentIdempotencyAsync(cleanIdempKey) : Promise.resolve(null),
+    ]);
+
+    if (persistentIdemp) {
+      inMemoryIdempotencyMap.set(cleanIdempKey, { certificate: persistentIdemp, timestamp: Date.now() });
+      return persistentIdemp;
+    }
+
     const reserved = getReservedNumbers();
     const settings = getDatabaseSettings();
 
@@ -1993,10 +2129,19 @@ export async function createAndSaveCertificateRecordAsync(payload: any): Promise
           await commitCertificateToFirestoreServer(
             newCertificate,
             Math.max(settings.certificateNextSeq || 1000842, seqInfo.nextCertSeq + 1),
-            Math.max(settings.scrappingNextSeq || 273682, seqInfo.nextScrapSeq + 1)
+            Math.max(settings.scrappingNextSeq || 273682, seqInfo.nextScrapSeq + 1),
+            cleanIdempKey || undefined
           );
           committed = true;
         } catch (txErr: any) {
+          if (txErr?.idempotentCertificate) {
+            const existing = txErr.idempotentCertificate as Certificate;
+            if (cleanIdempKey) {
+              inMemoryIdempotencyMap.set(cleanIdempKey, { certificate: existing, timestamp: Date.now() });
+            }
+            invalidateFirestoreCache(existing);
+            return existing;
+          }
           commitAttempts++;
           const msg = String(txErr?.message || '');
           const isCollision =
@@ -2004,6 +2149,14 @@ export async function createAndSaveCertificateRecordAsync(payload: any): Promise
             msg.includes('ALREADY_EXISTS') ||
             msg.includes('409') ||
             msg.includes('exists');
+          if (isCollision && cleanIdempKey) {
+            const existingIdemp = await getPersistentIdempotencyAsync(cleanIdempKey).catch(() => null);
+            if (existingIdemp) {
+              inMemoryIdempotencyMap.set(cleanIdempKey, { certificate: existingIdemp, timestamp: Date.now() });
+              invalidateFirestoreCache(existingIdemp);
+              return existingIdemp;
+            }
+          }
           if (isCollision && commitAttempts < 5) {
             const freshCerts = (await fetchCertificatesFromFirestoreServer(true).catch(() => certs)) || certs;
             const retryAlloc = getNextSequentialNumbers(freshCerts, reserved, settings);
@@ -2058,7 +2211,7 @@ export async function createAndSaveCertificateRecordAsync(payload: any): Promise
       }
     }
 
-    // Reserve numbers and update settings watermarks
+    // Reserve numbers and update settings watermarks in memory + async disk mirror
     if (!reserved.certificateNumbers.includes(candidateCertNo)) {
       reserved.certificateNumbers.push(candidateCertNo);
     }
@@ -2073,6 +2226,10 @@ export async function createAndSaveCertificateRecordAsync(payload: any): Promise
 
     const updated = [newCertificate, ...certs];
     saveDatabaseCertificates(updated);
+
+    if (cleanIdempKey) {
+      inMemoryIdempotencyMap.set(cleanIdempKey, { certificate: newCertificate, timestamp: Date.now() });
+    }
 
     return newCertificate;
   } finally {
@@ -2596,13 +2753,22 @@ export async function getPersistentIdempotencyAsync(key: string): Promise<Certif
   const cleanKey = key.trim().replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 128);
   if (!cleanKey) return null;
 
+  const memHit = inMemoryIdempotencyMap.get(cleanKey);
+  if (memHit && Date.now() - memHit.timestamp < 10 * 60 * 1000) {
+    return memHit.certificate;
+  }
+
   try {
     const adminDb = getFirebaseAdminDb();
     if (adminDb) {
       const snap = await adminDb.collection('idempotency_keys').doc(cleanKey).get();
       if (snap.exists) {
         const data = snap.data();
-        if (data && data.certificate) return data.certificate as Certificate;
+        if (data && data.certificate) {
+          const cert = data.certificate as Certificate;
+          inMemoryIdempotencyMap.set(cleanKey, { certificate: cert, timestamp: Date.now() });
+          return cert;
+        }
       }
     } else {
       const cfg = getFirebaseServerConfig();
@@ -2611,12 +2777,15 @@ export async function getPersistentIdempotencyAsync(key: string): Promise<Certif
         const docUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents/idempotency_keys/${cleanKey}`;
         const res = await fetch(docUrl, {
           headers: { Authorization: `Bearer ${token}` },
+          signal: AbortSignal.timeout(3500),
         });
         if (res.ok) {
           const docData = await res.json();
           const parsed = fromFirestoreDocument(docData);
           if (parsed && parsed.certificate) {
-            return typeof parsed.certificate === 'string' ? JSON.parse(parsed.certificate) : parsed.certificate;
+            const cert = typeof parsed.certificate === 'string' ? JSON.parse(parsed.certificate) : parsed.certificate;
+            inMemoryIdempotencyMap.set(cleanKey, { certificate: cert, timestamp: Date.now() });
+            return cert;
           }
         }
       }
@@ -2634,6 +2803,11 @@ export async function savePersistentIdempotencyAsync(key: string, cert: Certific
   if (!key || !cert) return;
   const cleanKey = key.trim().replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 128);
   if (!cleanKey) return;
+
+  if (inMemoryIdempotencyMap.has(cleanKey)) {
+    return;
+  }
+  inMemoryIdempotencyMap.set(cleanKey, { certificate: cert, timestamp: Date.now() });
 
   try {
     const adminDb = getFirebaseAdminDb();
@@ -2661,6 +2835,7 @@ export async function savePersistentIdempotencyAsync(key: string, cert: Certific
           body: JSON.stringify({
             fields: toFirestoreFields(payload),
           }),
+          signal: AbortSignal.timeout(4000),
         });
       }
     }
@@ -2668,4 +2843,13 @@ export async function savePersistentIdempotencyAsync(key: string, cert: Certific
     console.warn('[Idempotency] Firestore persist warning:', err);
   }
 }
+
+// Pre-warm Firestore certificate cache and maker credentials asynchronously on server startup
+setTimeout(() => {
+  if (isFirestoreServerConfigured()) {
+    fetchCertificatesFromFirestoreServer(false).catch(() => {});
+    getMakerCredentialsServer(false).catch(() => {});
+  }
+}, 50);
+
 

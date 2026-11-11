@@ -569,32 +569,7 @@ export default function App() {
   };
 
   const handleCertificateCreated = (newCert: Certificate) => {
-    // 1. Permanently store in local storage vault for offline resilience
-    saveToLocalVault(newCert);
-
-    // 1b. Persist to Firebase Firestore if authenticated via Firebase Auth
-    persistCertificateToFirestore(newCert).catch((err) => {
-      console.warn('Firestore client persistence notice:', err);
-    });
-
-    // 2. Auto-sync to Google Drive ("certificates" folder) in background if authenticated
-    autoSyncCertificateToDrive(newCert)
-      .then((res) => {
-        if (res.syncedToDrive) {
-          setLiveSyncFeedback(
-            `Certificate ${newCert.certificateNumber} issued and auto-synced to Google Drive folder!`
-          );
-          setTimeout(() => setLiveSyncFeedback(null), 8000);
-        } else if (res.queuedForLater) {
-          setLiveSyncFeedback(
-            `Certificate ${newCert.certificateNumber} issued! Queued for Google Drive auto-sync.`
-          );
-          setTimeout(() => setLiveSyncFeedback(null), 8000);
-        }
-      })
-      .catch(() => {});
-
-    // 3. Update Recent 5 Certificates immediately for Certificate Maker
+    // 1. Immediately transition to view the newly issued certificate and update Recent 5 state
     setRecentMakerCertificates((prev) => {
       const filtered = prev.filter(
         (c) => c.certificateNumber.toUpperCase() !== newCert.certificateNumber.toUpperCase()
@@ -602,7 +577,6 @@ export default function App() {
       return [newCert, ...filtered].slice(0, 5);
     });
 
-    // 4. Update Main Admin list only if Main Core Admin is active
     if (isMainAdmin) {
       setCertificates((prev) => {
         const exists = prev.some(
@@ -624,6 +598,80 @@ export default function App() {
 
     setSelectedCertificate(newCert);
     setActiveTab('view-certificate');
+    setLiveSyncFeedback(
+      `Certificate ${newCert.certificateNumber} issued and saved to Firestore! Syncing backup to Google Drive in background...`
+    );
+
+    // 2. Defer local storage vault serialization to next tick so UI transition is instantaneous
+    setTimeout(() => {
+      try {
+        saveToLocalVault(newCert);
+      } catch {}
+    }, 0);
+
+    // 3. Perform Google Drive backup asynchronously in the background (never blocks issuance)
+    setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent('ps-drive-sync-status', {
+          detail: {
+            certificateNumber: newCert.certificateNumber,
+            status: 'UPLOADING',
+          },
+        })
+      );
+
+      autoSyncCertificateToDrive(newCert)
+        .then((res) => {
+          if (res.syncedToDrive) {
+            window.dispatchEvent(
+              new CustomEvent('ps-drive-sync-status', {
+                detail: {
+                  certificateNumber: newCert.certificateNumber,
+                  status: 'BACKED_UP',
+                  driveFileUrl: res.driveFileUrl,
+                },
+              })
+            );
+            setLiveSyncFeedback(
+              `Certificate ${newCert.certificateNumber} issued and auto-synced to Google Drive folder!`
+            );
+            setTimeout(() => setLiveSyncFeedback(null), 8000);
+          } else if (res.queuedForLater) {
+            window.dispatchEvent(
+              new CustomEvent('ps-drive-sync-status', {
+                detail: {
+                  certificateNumber: newCert.certificateNumber,
+                  status: 'NOT_BACKED_UP',
+                },
+              })
+            );
+            setLiveSyncFeedback(
+              `Certificate ${newCert.certificateNumber} issued! Queued for Google Drive auto-sync when connected.`
+            );
+            setTimeout(() => setLiveSyncFeedback(null), 8000);
+          } else {
+            window.dispatchEvent(
+              new CustomEvent('ps-drive-sync-status', {
+                detail: {
+                  certificateNumber: newCert.certificateNumber,
+                  status: 'FAILED',
+                },
+              })
+            );
+          }
+        })
+        .catch((err: any) => {
+          window.dispatchEvent(
+            new CustomEvent('ps-drive-sync-status', {
+              detail: {
+                certificateNumber: newCert.certificateNumber,
+                status: 'FAILED',
+                error: err?.message || 'Google Drive background upload failed',
+              },
+            })
+          );
+        });
+    }, 50);
   };
 
   const handleUpdateStatus = async (

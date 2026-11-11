@@ -32,7 +32,7 @@ import {
   getDriveAccessToken,
   googleDriveSignIn,
 } from '../services/googleDriveAuth';
-import { uploadCertificatePdfToDrive } from '../services/googleDriveService';
+import { uploadCertificatePdfToDrive, autoSyncCertificateToDrive } from '../services/googleDriveService';
 import { Cloud, ExternalLink } from 'lucide-react';
 
 interface CertificateViewProps {
@@ -122,48 +122,44 @@ export const CertificateView: React.FC<CertificateViewProps> = ({
       .catch((err) => console.error('Error generating QR code:', err));
   }, [fullVerificationUrl]);
 
-  // Auto-backup newly generated certificate to Google Drive if Drive is connected
+  // Listen for background Google Drive synchronization status updates without blocking the main thread
   useEffect(() => {
     const isConn = isDriveConnected();
     setDriveConnected(isConn);
+    if (certificate.driveBackupStatus === 'BACKED_UP' || certificate.driveFileId) {
+      setDriveStatus('BACKED_UP');
+      setDriveFileUrl(
+        certificate.driveFileUrl ||
+          (certificate.driveFileId ? `https://drive.google.com/file/d/${certificate.driveFileId}/view` : undefined)
+      );
+    }
 
-    const autoBackup = async () => {
-      if (isConn && !certificate.driveFileId && driveStatus !== 'BACKED_UP' && driveStatus !== 'UPLOADING') {
+    const handleDriveStatusEvent = (ev: Event) => {
+      const detail = (ev as CustomEvent)?.detail;
+      if (!detail || detail.certificateNumber !== certificate.certificateNumber) return;
+      if (detail.status === 'UPLOADING') {
         setDriveStatus('UPLOADING');
-        try {
-          await new Promise((r) => setTimeout(r, 400));
-          const blob = await generateCertificatePdfBlob('certificate-print-area');
-          if (blob) {
-            const uploaded = await uploadCertificatePdfToDrive(certificate, blob);
-            setDriveFileUrl(uploaded.driveFileUrl);
-            setDriveStatus('BACKED_UP');
-            await fetch('/api/certificates/sync-uploaded-certificate', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${localStorage.getItem('ps_admin_token') || 'ps_admin_session_token_secure_2026'}`,
-              },
-              body: JSON.stringify({
-                certificateNumber: certificate.certificateNumber,
-                driveFileId: uploaded.driveFileId,
-                driveFileUrl: uploaded.driveFileUrl,
-                driveBackupStatus: 'BACKED_UP',
-              }),
-            });
-          } else {
-            setDriveStatus('NOT_BACKED_UP');
-          }
-        } catch (err) {
-          console.warn('Auto drive backup attempt warning:', err);
-          setDriveStatus('FAILED');
-        }
+        setDriveError(null);
+      } else if (detail.status === 'BACKED_UP') {
+        setDriveStatus('BACKED_UP');
+        if (detail.driveFileUrl) setDriveFileUrl(detail.driveFileUrl);
+        setDriveError(null);
+      } else if (detail.status === 'FAILED') {
+        setDriveStatus('FAILED');
+        if (detail.error) setDriveError(detail.error);
+      } else if (detail.status === 'NOT_BACKED_UP') {
+        setDriveStatus('NOT_BACKED_UP');
       }
     };
 
-    autoBackup();
-  }, [certificate.id, certificate.certificateNumber]);
+    window.addEventListener('ps-drive-sync-status', handleDriveStatusEvent);
+    return () => {
+      window.removeEventListener('ps-drive-sync-status', handleDriveStatusEvent);
+    };
+  }, [certificate.id, certificate.certificateNumber, certificate.driveBackupStatus, certificate.driveFileId, certificate.driveFileUrl]);
 
   const handleManualDriveBackup = async () => {
+    setDriveError(null);
     if (!isDriveConnected()) {
       try {
         const res = await googleDriveSignIn();
@@ -177,6 +173,12 @@ export const CertificateView: React.FC<CertificateViewProps> = ({
     }
     setDriveStatus('UPLOADING');
     try {
+      const syncRes = await autoSyncCertificateToDrive(certificate);
+      if (syncRes.syncedToDrive) {
+        if (syncRes.driveFileUrl) setDriveFileUrl(syncRes.driveFileUrl);
+        setDriveStatus('BACKED_UP');
+        return;
+      }
       const blob = await generateCertificatePdfBlob('certificate-print-area');
       if (!blob) throw new Error('Could not render certificate PDF.');
       const uploaded = await uploadCertificatePdfToDrive(certificate, blob);
@@ -188,6 +190,7 @@ export const CertificateView: React.FC<CertificateViewProps> = ({
           'Content-Type': 'application/json',
           Authorization: `Bearer ${localStorage.getItem('ps_admin_token') || 'ps_admin_session_token_secure_2026'}`,
         },
+        credentials: 'include',
         body: JSON.stringify({
           certificateNumber: certificate.certificateNumber,
           driveFileId: uploaded.driveFileId,
@@ -197,6 +200,7 @@ export const CertificateView: React.FC<CertificateViewProps> = ({
       });
     } catch (err: any) {
       console.error('Manual drive backup error:', err);
+      setDriveError(err?.message || 'Drive upload failed. Click Retry Drive Sync to try again.');
       setDriveStatus('FAILED');
     }
   };
@@ -301,8 +305,18 @@ export const CertificateView: React.FC<CertificateViewProps> = ({
               ) : driveStatus === 'UPLOADING' ? (
                 <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-sky-50 text-sky-800 border border-sky-300">
                   <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-600" />
-                  <span>Backing up to Drive...</span>
+                  <span>Syncing to Drive...</span>
                 </span>
+              ) : driveStatus === 'FAILED' ? (
+                <button
+                  type="button"
+                  onClick={handleManualDriveBackup}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-50 text-amber-900 border border-amber-300 hover:bg-amber-100 transition-colors cursor-pointer"
+                  title="Retry Google Drive upload without re-issuing certificate"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 text-amber-700" />
+                  <span>Retry Drive Sync</span>
+                </button>
               ) : (
                 <button
                   type="button"

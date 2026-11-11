@@ -2048,7 +2048,10 @@ export function configureExpressApp(): express.Application {
   // Create New Certificate (Admin/Maker only, random unique numbering, transactional save with collision retry)
   app.post('/api/certificates', async (req, res) => {
     try {
-      if (!isAdmin(req)) {
+      const startTimeMs = Date.now();
+      const isMaker = isAdmin(req);
+      const isCore = isMaker ? false : await isRequestCoreAdminAsync(req);
+      if (!isMaker && !isCore) {
         return res.status(401).json({ message: 'Administrator authentication required to generate certificates.' });
       }
       if (!isLiveCertificateIssuanceEnabled()) {
@@ -2069,33 +2072,37 @@ export function configureExpressApp(): express.Application {
           ''
       ).trim();
 
-      if (idempotencyKey) {
-        if (idempotencyStore.has(idempotencyKey)) {
-          const cached = idempotencyStore.get(idempotencyKey)!;
-          if (Date.now() - cached.timestamp < 10 * 60 * 1000) {
-            return res.status(200).json(cached.cert);
-          }
-        }
-        const persistentCert = await getPersistentIdempotencyAsync(idempotencyKey);
-        if (persistentCert) {
-          idempotencyStore.set(idempotencyKey, { cert: persistentCert, timestamp: Date.now() });
-          return res.status(200).json(persistentCert);
+      if (idempotencyKey && idempotencyStore.has(idempotencyKey)) {
+        const cached = idempotencyStore.get(idempotencyKey)!;
+        if (Date.now() - cached.timestamp < 10 * 60 * 1000) {
+          res.setHeader('X-Idempotent-Replay', 'true');
+          return res.status(200).json(cached.cert);
         }
       }
 
-      const newCertificate = await createAndSaveCertificateRecordAsync(req.body);
-      const localCerts = getCertificates();
-      if (!localCerts.some((c) => c.certificateNumber.toUpperCase() === newCertificate.certificateNumber.toUpperCase())) {
-        localCerts.unshift(newCertificate);
-        saveCertificates(localCerts, true);
-      }
+      const newCertificate = await createAndSaveCertificateRecordAsync(req.body, idempotencyKey || undefined);
 
       if (idempotencyKey) {
         idempotencyStore.set(idempotencyKey, { cert: newCertificate, timestamp: Date.now() });
-        savePersistentIdempotencyAsync(idempotencyKey, newCertificate).catch(() => {});
       }
 
+      res.setHeader('Server-Timing', `issuance;dur=${Date.now() - startTimeMs}`);
       res.status(201).json(newCertificate);
+
+      // Update secondary local backup mirrors asynchronously in the background without blocking HTTP response
+      setImmediate(() => {
+        try {
+          const localCerts = getCertificates();
+          if (
+            !localCerts.some(
+              (c) => c.certificateNumber.toUpperCase() === newCertificate.certificateNumber.toUpperCase()
+            )
+          ) {
+            localCerts.unshift(newCertificate);
+            saveCertificates(localCerts, true);
+          }
+        } catch {}
+      });
     } catch (err: any) {
       console.error('Error creating certificate:', err);
       if (err.isDuplicateVehicle) {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -136,6 +136,9 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
     setAllowDuplicateOverride(false);
     setIncludeIdProof(false);
     setErrorMessage(null);
+    setModalErrorMessage(null);
+    setIssuanceStep('');
+    pendingIdempotencyKeyRef.current = null;
     fetchNext(true);
   };
 
@@ -159,8 +162,13 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
   const [allowDuplicateOverride, setAllowDuplicateOverride] = useState(false);
   const [includeIdProof, setIncludeIdProof] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [issuanceStep, setIssuanceStep] = useState<string>('');
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [modalErrorMessage, setModalErrorMessage] = useState<string | null>(null);
+
+  const isSubmittingRef = useRef(false);
+  const pendingIdempotencyKeyRef = useRef<string | null>(null);
 
   const [isFetchingNumbers, setIsFetchingNumbers] = useState(false);
 
@@ -321,8 +329,9 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmitting) return;
+    if (isSubmitting || isSubmittingRef.current) return;
     setErrorMessage(null);
+    setModalErrorMessage(null);
 
     // Form Validations - Mandatory fields
     if (!formData.ownerName.trim()) {
@@ -335,14 +344,27 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
       setAllowDuplicateOverride(true);
     }
 
+    // Generate a stable idempotency key for this submission session if not already present
+    if (!pendingIdempotencyKeyRef.current) {
+      pendingIdempotencyKeyRef.current = `req_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    }
+
     // Open confirmation popup asking if customer wants to scrap this vehicle
     setShowConfirmModal(true);
   };
 
   const handleConfirmGenerate = async () => {
-    if (isSubmitting) return;
+    if (isSubmitting || isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
     setIsSubmitting(true);
-    const idempotencyKey = `req_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    setModalErrorMessage(null);
+    setErrorMessage(null);
+    setIssuanceStep('Validating details...');
+
+    if (!pendingIdempotencyKeyRef.current) {
+      pendingIdempotencyKeyRef.current = `req_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    }
+    const idempotencyKey = pendingIdempotencyKeyRef.current;
 
     const safePayload = {
       ...formData,
@@ -381,24 +403,38 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
           : undefined,
     };
 
+    const stepTimer1 = setTimeout(() => {
+      if (isSubmittingRef.current) setIssuanceStep('Securing certificate number...');
+    }, 60);
+    const stepTimer2 = setTimeout(() => {
+      if (isSubmittingRef.current) setIssuanceStep('Saving certificate...');
+    }, 180);
+
     try {
       let res: Response | null = null;
       let retries = 0;
       const maxRetries = 2;
 
       while (retries <= maxRetries) {
-        const headers: Record<string, string> = {
-          'Content-Type': 'application/json',
-          'Idempotency-Key': idempotencyKey,
-          'x-idempotency-key': idempotencyKey,
-          ...getAuthHeaders(),
-        };
-        res = await fetch(getApiUrl('/api/certificates'), {
-          method: 'POST',
-          headers,
-          credentials: 'include',
-          body: JSON.stringify(safePayload),
-        });
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
+        try {
+          const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': idempotencyKey,
+            'x-idempotency-key': idempotencyKey,
+            ...getAuthHeaders(),
+          };
+          res = await fetch(getApiUrl('/api/certificates'), {
+            method: 'POST',
+            headers,
+            credentials: 'include',
+            body: JSON.stringify(safePayload),
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
 
         // Exponential backoff for HTTP 429 rate limit
         if (res.status === 429 && retries < maxRetries) {
@@ -409,6 +445,9 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
         }
         break;
       }
+
+      clearTimeout(stepTimer1);
+      clearTimeout(stepTimer2);
 
       if (!res || !res.ok) {
         if (res && res.status === 429) {
@@ -432,16 +471,28 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
       }
 
       const createdCertificate: Certificate = await res.json();
+      setIssuanceStep('Certificate issued successfully.');
 
-      resetForm();
+      // Clear the idempotency key now that this submission succeeded
+      pendingIdempotencyKeyRef.current = null;
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
       setShowConfirmModal(false);
+      resetForm();
       onCertificateCreated(createdCertificate);
     } catch (err: any) {
+      clearTimeout(stepTimer1);
+      clearTimeout(stepTimer2);
       console.error('Certificate creation failed:', err);
-      setErrorMessage(err.message || 'Failed to issue certificate. Please check server connection.');
+      const isAbort = err?.name === 'AbortError' || String(err?.message || '').toLowerCase().includes('abort');
+      const friendlyError = isAbort
+        ? 'Server request timed out. Click "Retry Safe Submission" below — your idempotency key is preserved so no duplicate certificate will be created.'
+        : err.message || 'Failed to issue certificate. Please check server connection.';
+      setErrorMessage(friendlyError);
+      setModalErrorMessage(friendlyError);
+      setIssuanceStep('');
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
-      setShowConfirmModal(false);
     }
   };
 
@@ -1379,19 +1430,58 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
                 <div className="flex items-center gap-2">
                   <Cloud className="w-4 h-4 text-sky-600 shrink-0" />
                   <span className="font-semibold">Google Drive Auto-Sync:</span>
-                  <span className="text-sky-700">Auto-saved to Drive "certificates" folder from all devices</span>
+                  <span className="text-sky-700">Runs asynchronously in background after Firestore save</span>
                 </div>
                 <span className="px-2 py-0.5 bg-sky-200/80 text-sky-900 font-bold text-[10px] rounded-md uppercase tracking-wider shrink-0">
-                  Auto-Sync On
+                  Non-Blocking
                 </span>
               </div>
+
+              {/* Step-by-Step Progress Indicator */}
+              {isSubmitting && (
+                <div
+                  id="issuance-progress-banner"
+                  className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 flex items-center gap-3 text-xs text-emerald-950"
+                >
+                  <Loader2 className="w-4 h-4 text-emerald-600 animate-spin shrink-0" />
+                  <div className="flex-1">
+                    <div className="font-bold text-emerald-900">
+                      {issuanceStep || 'Saving certificate...'}
+                    </div>
+                    <div className="text-[11px] text-emerald-700 mt-0.5">
+                      Authoritative Firestore atomic transaction in progress
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Error & Safe Retry Banner inside Confirmation Modal */}
+              {modalErrorMessage && !isSubmitting && (
+                <div
+                  id="issuance-error-banner"
+                  className="bg-rose-50 border border-rose-300 rounded-xl p-3.5 text-xs text-rose-950 space-y-2"
+                >
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    <div className="font-semibold text-rose-900">{modalErrorMessage}</div>
+                  </div>
+                  <div className="text-[11px] text-rose-700">
+                    Safe Idempotency Key active ({pendingIdempotencyKeyRef.current}) — retrying will never create a duplicate certificate.
+                  </div>
+                </div>
+              )}
 
               {/* Yes / No Actions */}
               <div className="pt-2 flex items-center justify-end gap-3">
                 <button
                   id="btn-confirm-no"
                   type="button"
-                  onClick={() => setShowConfirmModal(false)}
+                  onClick={() => {
+                    if (!isSubmitting) {
+                      setModalErrorMessage(null);
+                      setShowConfirmModal(false);
+                    }
+                  }}
                   disabled={isSubmitting}
                   className="flex-1 sm:flex-none px-6 py-2.5 text-sm font-bold text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 active:bg-slate-300 rounded-xl transition-colors cursor-pointer min-h-[44px] flex items-center justify-center"
                 >
@@ -1408,12 +1498,17 @@ export const CreateCertificateForm: React.FC<CreateCertificateFormProps> = ({
                   {isSubmitting ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin" />
-                      Making Certificate...
+                      <span>{issuanceStep || 'Saving certificate...'}</span>
+                    </>
+                  ) : modalErrorMessage ? (
+                    <>
+                      <RefreshCw className="w-4 h-4" />
+                      <span>Retry Safe Submission</span>
                     </>
                   ) : (
                     <>
                       <CheckCircle2 className="w-4 h-4" />
-                      Yes, Issue Certificate
+                      <span>Yes, Issue Certificate</span>
                     </>
                   )}
                 </button>

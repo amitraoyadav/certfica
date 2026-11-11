@@ -722,11 +722,10 @@ export async function handleApiRequest(req: any, res: any) {
       return res.status(200).json(filtered);
     }
 
-    const certs = await getDatabaseCertificatesAsync();
-
     if (method === 'POST') {
+      const startTimeMs = Date.now();
       const isMaker = isRequestAdmin(req, makerVer);
-      const isCore = await isRequestCoreAdminAsync(req);
+      const isCore = isMaker ? false : await isRequestCoreAdminAsync(req);
       if (!isMaker && !isCore) {
         recordSystemError('AUTH', 'Unauthorized certificate creation attempt blocked.', 'WARNING', '/api/certificates');
         return res.status(401).json({
@@ -756,22 +755,25 @@ export async function handleApiRequest(req: any, res: any) {
           ''
       ).trim();
 
-      if (idempotencyKey) {
-        if (idempotencyCache.has(idempotencyKey)) {
-          const cached = idempotencyCache.get(idempotencyKey)!;
-          if (Date.now() - cached.timestamp < 10 * 60 * 1000) {
-            return res.status(200).json(cached.result);
-          }
-        }
-        const persistentCert = await getPersistentIdempotencyAsync(idempotencyKey);
-        if (persistentCert) {
-          idempotencyCache.set(idempotencyKey, { result: persistentCert, timestamp: Date.now() });
-          return res.status(200).json(persistentCert);
+      if (idempotencyKey && idempotencyCache.has(idempotencyKey)) {
+        const cached = idempotencyCache.get(idempotencyKey)!;
+        if (Date.now() - cached.timestamp < 10 * 60 * 1000) {
+          res.setHeader('X-Idempotent-Replay', 'true');
+          return res.status(200).json(cached.result);
         }
       }
 
       try {
         if (body.id && body.certificateNumber && body.qrToken) {
+          if (idempotencyKey) {
+            const persistentCert = await getPersistentIdempotencyAsync(idempotencyKey);
+            if (persistentCert) {
+              idempotencyCache.set(idempotencyKey, { result: persistentCert, timestamp: Date.now() });
+              res.setHeader('X-Idempotent-Replay', 'true');
+              return res.status(200).json(persistentCert);
+            }
+          }
+          const certs = await getDatabaseCertificatesAsync();
           const newCert = body as Certificate;
           const exists = certs.some(
             (c) => c.certificateNumber.toUpperCase() === newCert.certificateNumber.toUpperCase()
@@ -791,11 +793,11 @@ export async function handleApiRequest(req: any, res: any) {
         }
 
         if (body.ownerName) {
-          const created = await createAndSaveCertificateRecordAsync(body);
+          const created = await createAndSaveCertificateRecordAsync(body, idempotencyKey || undefined);
           if (idempotencyKey) {
             idempotencyCache.set(idempotencyKey, { result: created, timestamp: Date.now() });
-            savePersistentIdempotencyAsync(idempotencyKey, created).catch(() => {});
           }
+          res.setHeader('Server-Timing', `issuance;dur=${Date.now() - startTimeMs}`);
           return res.status(201).json(created);
         }
 
