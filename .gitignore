@@ -10,8 +10,10 @@ coverage/
 # Credentials & Service Accounts (Never commit to Git)
 serviceAccountKey*.json
 *service_account*.json
+*service-account*.json
 *.pem
 *.key
 credentials*.json
 data/core_admin_credentials.json
+*.tmp.*
 
