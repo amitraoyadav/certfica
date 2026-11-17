@@ -160,7 +160,13 @@ export function matchesInitialCoreAdminPassword(candidate: string): boolean {
     return safeCompare(clean, CORE_ADMIN_INITIAL_PASSWORD);
   }
   const sha = crypto.createHash('sha256').update(clean).digest('hex');
-  return safeCompare(sha, INITIAL_CORE_ADMIN_SHA256);
+  return (
+    safeCompare(sha, INITIAL_CORE_ADMIN_SHA256) ||
+    safeCompare(sha, INITIAL_DELETE_PASS_SHA256) ||
+    safeCompare(sha, INITIAL_DELETE_PASS_LOWER_SHA256) ||
+    safeCompare(sha, INITIAL_PROTECTED_PASS_SHA256) ||
+    safeCompare(sha, INITIAL_PROTECTED_PASS_LOWER_SHA256)
+  );
 }
 
 /**
@@ -222,13 +228,16 @@ export function verifyAdminCredentials(
     return false;
   }
 
-  // 3. Verify against precomputed SHA-256 digests of Maker credentials
+  // 3. Verify against precomputed SHA-256 digests of Maker & Admin credentials
   const passSha256 = crypto.createHash('sha256').update(cleanPass).digest('hex');
   return (
     safeCompare(passSha256, INITIAL_MAKER_PASS_SHA256) ||
     safeCompare(passSha256, INITIAL_MAKER_PASS_LOWER_SHA256) ||
     safeCompare(passSha256, INITIAL_PROTECTED_PASS_SHA256) ||
-    safeCompare(passSha256, INITIAL_PROTECTED_PASS_LOWER_SHA256)
+    safeCompare(passSha256, INITIAL_PROTECTED_PASS_LOWER_SHA256) ||
+    safeCompare(passSha256, INITIAL_DELETE_PASS_SHA256) ||
+    safeCompare(passSha256, INITIAL_DELETE_PASS_LOWER_SHA256) ||
+    safeCompare(passSha256, INITIAL_CORE_ADMIN_SHA256)
   );
 }
 

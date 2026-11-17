@@ -1826,7 +1826,7 @@ export async function authenticateCoreAdminPassword(providedPassword?: string): 
     const ver = Math.max(MIN_CORE_ADMIN_SESSION_VERSION, Number(stored.sessionVersion) || MIN_CORE_ADMIN_SESSION_VERSION);
     const matched =
       verifyCoreAdminHash(clean, stored.passwordHash) ||
-      Boolean(CORE_ADMIN_INITIAL_PASSWORD && safeCompare(clean, CORE_ADMIN_INITIAL_PASSWORD));
+      matchesInitialCoreAdminPassword(clean);
     if (!matched) {
       return { authenticated: false, sessionVersion: ver };
     }

@@ -2981,5 +2981,27 @@
     "details": "Main Core Admin privileges unlocked successfully.",
     "ip": "127.0.0.1",
     "userAgent": "node"
+  },
+  {
+    "id": "audit-1794917241026-81d080e8",
+    "timestamp": "2026-11-17T12:07:21.026Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin privileges unlocked successfully.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
+  },
+  {
+    "id": "audit-1794917241108-3213e8cf",
+    "timestamp": "2026-11-17T12:07:21.108Z",
+    "certificateId": "AUTH",
+    "certificateNumber": "MAIN-ADMIN",
+    "action": "MAIN_ADMIN_AUTH_SUCCESS",
+    "actor": "main-admin",
+    "details": "Main Core Admin privileges unlocked successfully.",
+    "ip": "127.0.0.1",
+    "userAgent": "node"
   }
 ]
