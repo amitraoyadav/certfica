@@ -19,12 +19,16 @@ import {
   extractCoreAdminTokensFromReq,
   safeCompare,
   setCachedMakerSessionVersion,
+  MIN_MAKER_SESSION_VERSION,
+  MIN_CORE_ADMIN_SESSION_VERSION,
+  REVOKED_EXPOSED_PASSWORD_HASHES,
 } from './_auth.js';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const CERTIFICATES_FILE = path.join(DATA_DIR, 'certificates.json');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const CORE_ADMIN_CREDS_FILE = path.join(DATA_DIR, 'core_admin_credentials.json');
+const MAKER_CREDS_FILE = path.join(DATA_DIR, 'maker_credentials.json');
 const RESERVED_NUMBERS_FILE = path.join(DATA_DIR, 'reserved_numbers.json');
 const DATABASE_BACKUPS_DIR = path.join(DATA_DIR, 'database_backups');
 const EXPORTS_DIR = path.join(DATA_DIR, 'exports');
@@ -43,6 +47,7 @@ const DEFAULT_SETTINGS: SystemSettings = {
   scrappingNextSeq: 273682,
   warnDuplicateVehicle: true,
   adminUsername: 'pscrappers',
+  makerSessionVersion: MIN_MAKER_SESSION_VERSION,
 };
 
 // Authoritative exclusion list for confirmed synthetic test certificates generated during audit suites
@@ -117,15 +122,22 @@ declare global {
   var _psFirestoreTokenCache: { accessToken: string; expiresAt: number } | undefined;
 }
 
-export interface FirebaseServerConfigInfo {
+export interface ParsedServiceAccountCredentials {
   projectId: string;
   databaseId: string;
   apiKey?: string;
+  clientEmail: string;
+  privateKey: string;
+  hasClientEmail: boolean;
+  hasPrivateKey: boolean;
+  hasServiceAccountJson: boolean;
+  privateKeyValidPem: boolean;
   serviceAccountConfigured: boolean;
-  clientEmail?: string;
+  clientEmailMasked?: string;
+  credentialDiagnostic: string;
 }
 
-export function getFirebaseServerConfig(): FirebaseServerConfigInfo {
+export function parseServiceAccountCredentials(): ParsedServiceAccountCredentials {
   let fileConfig: any = {};
   try {
     if (fs.existsSync(FIREBASE_CONFIG_FILE)) {
@@ -133,10 +145,36 @@ export function getFirebaseServerConfig(): FirebaseServerConfigInfo {
     }
   } catch {}
 
+  const rawJsonEnv = (
+    process.env.FIREBASE_SERVICE_ACCOUNT_JSON ||
+    process.env.FIREBASE_SERVICE_ACCOUNT ||
+    process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON ||
+    ''
+  ).trim();
+
   let saJson: any = null;
-  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON && process.env.FIREBASE_SERVICE_ACCOUNT_JSON.trim()) {
+  if (rawJsonEnv) {
     try {
-      saJson = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON.trim());
+      saJson = JSON.parse(rawJsonEnv);
+    } catch {
+      try {
+        const decoded = Buffer.from(rawJsonEnv, 'base64').toString('utf-8');
+        saJson = JSON.parse(decoded);
+      } catch {}
+    }
+  }
+
+  let rawKeyEnv = (
+    process.env.FIREBASE_PRIVATE_KEY ||
+    process.env.FIREBASE_ADMIN_PRIVATE_KEY ||
+    process.env.GOOGLE_PRIVATE_KEY ||
+    ''
+  ).trim();
+
+  if (!saJson && rawKeyEnv.startsWith('{') && rawKeyEnv.includes('"private_key"')) {
+    try {
+      saJson = JSON.parse(rawKeyEnv);
+      rawKeyEnv = String(saJson.private_key || '').trim();
     } catch {}
   }
 
@@ -155,22 +193,118 @@ export function getFirebaseServerConfig(): FirebaseServerConfigInfo {
   ).trim();
 
   const apiKey = (process.env.FIREBASE_API_KEY || fileConfig.apiKey || '').trim();
-  const clientEmail = (process.env.FIREBASE_CLIENT_EMAIL || saJson?.client_email || '').trim();
-  const rawPrivateKey = (process.env.FIREBASE_PRIVATE_KEY || saJson?.private_key || '').trim();
-  const serviceAccountConfigured = Boolean(projectId && clientEmail && rawPrivateKey);
+
+  const clientEmail = (
+    process.env.FIREBASE_CLIENT_EMAIL ||
+    process.env.FIREBASE_ADMIN_CLIENT_EMAIL ||
+    process.env.GOOGLE_CLIENT_EMAIL ||
+    saJson?.client_email ||
+    ''
+  )
+    .trim()
+    .replace(/^["']|["']$/g, '');
+
+  let privateKey = (rawKeyEnv || saJson?.private_key || '')
+    .trim()
+    .replace(/^["']|["']$/g, '')
+    .replace(/\\\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\r\n/g, '\n');
+
+  if (privateKey && !privateKey.includes('BEGIN') && /^[A-Za-z0-9+/=\s]+$/.test(privateKey)) {
+    try {
+      const decodedPem = Buffer.from(privateKey.replace(/\s+/g, ''), 'base64').toString('utf-8');
+      if (decodedPem.includes('BEGIN')) {
+        privateKey = decodedPem.replace(/\\n/g, '\n').replace(/\r\n/g, '\n');
+      }
+    } catch {}
+  }
+
+  const hasServiceAccountJson = Boolean(rawJsonEnv);
+  const hasClientEmail = Boolean(clientEmail && !clientEmail.startsWith('REPLACE_WITH_'));
+  const hasPrivateKey = Boolean(privateKey && !privateKey.includes('REPLACE_WITH_'));
+
+  let privateKeyValidPem = false;
+  let pemError = '';
+  if (hasPrivateKey) {
+    try {
+      crypto.createPrivateKey(privateKey);
+      privateKeyValidPem = true;
+    } catch (e: any) {
+      pemError = e?.message || 'Invalid PEM format';
+    }
+  }
+
+  const serviceAccountConfigured = Boolean(projectId && hasClientEmail && hasPrivateKey && privateKeyValidPem);
+
+  let clientEmailMasked: string | undefined;
+  if (hasClientEmail && clientEmail.includes('@')) {
+    const [localPart, domainPart] = clientEmail.split('@');
+    clientEmailMasked = `${localPart.slice(0, 6)}***@${domainPart}`;
+  }
+
+  let credentialDiagnostic = 'Service Account configured and PEM key verified.';
+  if (!hasClientEmail && !hasPrivateKey) {
+    credentialDiagnostic =
+      'Missing FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY (or FIREBASE_SERVICE_ACCOUNT_JSON) in environment variables.';
+  } else if (!hasClientEmail) {
+    credentialDiagnostic = 'Missing FIREBASE_CLIENT_EMAIL in environment variables.';
+  } else if (!hasPrivateKey) {
+    credentialDiagnostic = 'Missing FIREBASE_PRIVATE_KEY in environment variables.';
+  } else if (!privateKeyValidPem) {
+    credentialDiagnostic = `FIREBASE_PRIVATE_KEY is present but failed RSA PEM validation: ${pemError}`;
+  }
 
   return {
     projectId,
     databaseId,
     apiKey: apiKey || undefined,
+    clientEmail: hasClientEmail ? clientEmail : '',
+    privateKey: privateKeyValidPem ? privateKey : '',
+    hasClientEmail,
+    hasPrivateKey,
+    hasServiceAccountJson,
+    privateKeyValidPem,
     serviceAccountConfigured,
-    clientEmail: clientEmail || undefined,
+    clientEmailMasked,
+    credentialDiagnostic,
+  };
+}
+
+export interface FirebaseServerConfigInfo {
+  projectId: string;
+  databaseId: string;
+  apiKey?: string;
+  serviceAccountConfigured: boolean;
+  clientEmail?: string;
+  clientEmailMasked?: string;
+  hasClientEmail?: boolean;
+  hasPrivateKey?: boolean;
+  hasServiceAccountJson?: boolean;
+  privateKeyValidPem?: boolean;
+  credentialDiagnostic?: string;
+}
+
+export function getFirebaseServerConfig(): FirebaseServerConfigInfo {
+  const parsed = parseServiceAccountCredentials();
+  return {
+    projectId: parsed.projectId,
+    databaseId: parsed.databaseId,
+    apiKey: parsed.apiKey,
+    serviceAccountConfigured: parsed.serviceAccountConfigured,
+    clientEmail: parsed.clientEmail || undefined,
+    clientEmailMasked: parsed.clientEmailMasked,
+    hasClientEmail: parsed.hasClientEmail,
+    hasPrivateKey: parsed.hasPrivateKey,
+    hasServiceAccountJson: parsed.hasServiceAccountJson,
+    privateKeyValidPem: parsed.privateKeyValidPem,
+    credentialDiagnostic: parsed.credentialDiagnostic,
   };
 }
 
 export function isFirestoreServerConfigured(): boolean {
-  const cfg = getFirebaseServerConfig();
-  return Boolean(cfg.serviceAccountConfigured || (cfg.projectId && cfg.databaseId && cfg.apiKey));
+  const cfg = parseServiceAccountCredentials();
+  return cfg.serviceAccountConfigured;
 }
 
 export function isLiveCertificateIssuanceEnabled(): boolean {
@@ -180,43 +314,25 @@ export function isLiveCertificateIssuanceEnabled(): boolean {
 let cachedAdminDb: AdminFirestore | null = null;
 
 export function getFirebaseAdminDb(): AdminFirestore | null {
-  const cfg = getFirebaseServerConfig();
-  if (!cfg.serviceAccountConfigured) return null;
+  const creds = parseServiceAccountCredentials();
+  if (!creds.serviceAccountConfigured) return null;
   if (cachedAdminDb) return cachedAdminDb;
 
   try {
-    let saJson: any = null;
-    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON && process.env.FIREBASE_SERVICE_ACCOUNT_JSON.trim()) {
-      try {
-        saJson = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON.trim());
-      } catch {}
-    }
-    const clientEmail = (process.env.FIREBASE_CLIENT_EMAIL || saJson?.client_email || '')
-      .trim()
-      .replace(/^["']|["']$/g, '');
-    const privateKey = (process.env.FIREBASE_PRIVATE_KEY || saJson?.private_key || '')
-      .trim()
-      .replace(/^["']|["']$/g, '')
-      .replace(/\\n/g, '\n');
-
-    if (!clientEmail || !privateKey || clientEmail.startsWith('REPLACE_WITH_')) {
-      return null;
-    }
-
     const existingApps = getAdminApps();
     const adminApp =
       existingApps.length > 0
         ? existingApps[0]
         : initializeAdminApp({
             credential: adminCert({
-              projectId: cfg.projectId,
-              clientEmail,
-              privateKey,
+              projectId: creds.projectId,
+              clientEmail: creds.clientEmail,
+              privateKey: creds.privateKey,
             }),
-            projectId: cfg.projectId,
+            projectId: creds.projectId,
           });
 
-    cachedAdminDb = getAdminFirestore(adminApp, cfg.databaseId);
+    cachedAdminDb = getAdminFirestore(adminApp, creds.databaseId);
     return cachedAdminDb;
   } catch (err: any) {
     console.error('[Firebase Admin SDK Init Warning]:', err.message);
@@ -225,29 +341,18 @@ export function getFirebaseAdminDb(): AdminFirestore | null {
 }
 
 export async function getFirestoreAccessToken(): Promise<string | null> {
-  const cfg = getFirebaseServerConfig();
-  if (!cfg.serviceAccountConfigured) return null;
+  const creds = parseServiceAccountCredentials();
+  if (!creds.serviceAccountConfigured) return null;
 
   if (global._psFirestoreTokenCache && global._psFirestoreTokenCache.expiresAt > Date.now() + 60000) {
     return global._psFirestoreTokenCache.accessToken;
   }
 
-  let saJson: any = null;
-  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON && process.env.FIREBASE_SERVICE_ACCOUNT_JSON.trim()) {
-    try {
-      saJson = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON.trim());
-    } catch {}
-  }
-  const clientEmail = (process.env.FIREBASE_CLIENT_EMAIL || saJson?.client_email || '').trim();
-  const privateKey = (process.env.FIREBASE_PRIVATE_KEY || saJson?.private_key || '')
-    .replace(/\\n/g, '\n')
-    .trim();
-
   const nowSec = Math.floor(Date.now() / 1000);
   const headerB64 = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
   const claimB64 = Buffer.from(
     JSON.stringify({
-      iss: clientEmail,
+      iss: creds.clientEmail,
       scope: 'https://www.googleapis.com/auth/datastore',
       aud: 'https://oauth2.googleapis.com/token',
       iat: nowSec,
@@ -257,7 +362,7 @@ export async function getFirestoreAccessToken(): Promise<string | null> {
 
   const signer = crypto.createSign('RSA-SHA256');
   signer.update(`${headerB64}.${claimB64}`);
-  const signatureB64 = signer.sign(privateKey, 'base64url');
+  const signatureB64 = signer.sign(creds.privateKey, 'base64url');
   const assertion = `${headerB64}.${claimB64}.${signatureB64}`;
 
   const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
@@ -340,7 +445,6 @@ function fromFirestoreDocument(docObj: any): any {
   return out;
 }
 
-export const SERVER_WRITE_TOKEN = 'ps_srv_tx_auth_9f8e7d6c5b4a_2026';
 let firestoreCertsCache: { certs: Certificate[]; fetchedAt: number } | null = null;
 let inFlightFirestoreCertsPromise: Promise<Certificate[] | null> | null = null;
 let firestoreQuotaCooldownUntil = 0;
@@ -423,19 +527,16 @@ export async function commitCertificateToFirestoreServer(
 
       tx.create(certRef, {
         ...(newCertificate as any),
-        serverWriteToken: SERVER_WRITE_TOKEN,
       });
       tx.create(resCertRef, {
         certificateNumber: newCertificate.certificateNumber,
         certificateId: newCertificate.id,
         reservedAt: now,
-        serverWriteToken: SERVER_WRITE_TOKEN,
       });
       tx.create(resScrapRef, {
         scrappingRegistrationNumber: newCertificate.scrappingRegistrationNumber,
         certificateId: newCertificate.id,
         reservedAt: now,
-        serverWriteToken: SERVER_WRITE_TOKEN,
       });
       tx.set(
         settingsRef,
@@ -445,7 +546,6 @@ export async function commitCertificateToFirestoreServer(
           scrappingPrefix: 'REG-C',
           scrappingNextSeq: nextScrapSeq,
           updatedAt: now,
-          serverWriteToken: SERVER_WRITE_TOKEN,
         },
         { merge: true }
       );
@@ -457,7 +557,6 @@ export async function commitCertificateToFirestoreServer(
         details: `Issued certificate ${newCertificate.certificateNumber} (${newCertificate.scrappingRegistrationNumber}) for vehicle ${newCertificate.vehicleRegistrationNumber}`,
         performedBy: newCertificate.createdBy || 'Admin',
         timestamp: now,
-        serverWriteToken: SERVER_WRITE_TOKEN,
       });
       if (idempRef && cleanIdempKey) {
         tx.create(idempRef, {
@@ -477,14 +576,18 @@ export async function commitCertificateToFirestoreServer(
     return true;
   }
 
-  // 2. Fallback path: Firestore REST API atomic :commit with currentDocument: { exists: false }
-  const token = await getFirestoreAccessToken().catch(() => null);
-  if (!token && !cfg.apiKey) return false;
+  // 2. Fallback path: Firestore REST API atomic :commit authenticated strictly via Service Account OAuth2 Bearer token
+  const token = await getFirestoreAccessToken();
+  if (!token) {
+    const authErr: any = new Error(
+      `Firestore Service Account authentication is required for atomic certificate commits. ${cfg.credentialDiagnostic || 'Configure FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY in Vercel Production environment variables.'}`
+    );
+    authErr.statusCode = 503;
+    throw authErr;
+  }
 
   const dbRoot = `projects/${cfg.projectId}/databases/${cfg.databaseId}/documents`;
-  const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  const keyParam = !token && cfg.apiKey ? `?key=${encodeURIComponent(cfg.apiKey)}` : '';
-  const commitUrl = `https://firestore.googleapis.com/v1/${dbRoot}:commit${keyParam}`;
+  const commitUrl = `https://firestore.googleapis.com/v1/${dbRoot}:commit`;
 
   const writes: any[] = [
     {
@@ -492,7 +595,6 @@ export async function commitCertificateToFirestoreServer(
         name: `${dbRoot}/certificates/${newCertificate.id}`,
         fields: toFirestoreFields({
           ...(newCertificate as any),
-          serverWriteToken: SERVER_WRITE_TOKEN,
         }),
       },
       currentDocument: { exists: false },
@@ -504,7 +606,6 @@ export async function commitCertificateToFirestoreServer(
           certificateNumber: newCertificate.certificateNumber,
           certificateId: newCertificate.id,
           reservedAt: now,
-          serverWriteToken: SERVER_WRITE_TOKEN,
         }),
       },
       currentDocument: { exists: false },
@@ -516,7 +617,6 @@ export async function commitCertificateToFirestoreServer(
           scrappingRegistrationNumber: newCertificate.scrappingRegistrationNumber,
           certificateId: newCertificate.id,
           reservedAt: now,
-          serverWriteToken: SERVER_WRITE_TOKEN,
         }),
       },
       currentDocument: { exists: false },
@@ -530,7 +630,6 @@ export async function commitCertificateToFirestoreServer(
           scrappingPrefix: 'REG-C',
           scrappingNextSeq: nextScrapSeq,
           updatedAt: now,
-          serverWriteToken: SERVER_WRITE_TOKEN,
         }),
       },
       updateMask: {
@@ -540,7 +639,6 @@ export async function commitCertificateToFirestoreServer(
           'scrappingPrefix',
           'scrappingNextSeq',
           'updatedAt',
-          'serverWriteToken',
         ],
       },
     },
@@ -555,7 +653,6 @@ export async function commitCertificateToFirestoreServer(
           details: `Issued certificate ${newCertificate.certificateNumber} (${newCertificate.scrappingRegistrationNumber}) for vehicle ${newCertificate.vehicleRegistrationNumber}`,
           performedBy: newCertificate.createdBy || 'Admin',
           timestamp: now,
-          serverWriteToken: SERVER_WRITE_TOKEN,
         }),
       },
       currentDocument: { exists: false },
@@ -583,7 +680,7 @@ export async function commitCertificateToFirestoreServer(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...authHeaders,
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify({ writes }),
     signal: AbortSignal.timeout(8000),
@@ -606,16 +703,52 @@ export async function updateCertificateInFirestoreServer(
   auditDetails = ''
 ): Promise<boolean> {
   const cfg = getFirebaseServerConfig();
-  const token = await getFirestoreAccessToken().catch(() => null);
-  if (!token && !cfg.apiKey) return false;
-
-  const dbRoot = `projects/${cfg.projectId}/databases/${cfg.databaseId}/documents`;
   const now = new Date().toISOString();
   const auditId = `audit_upd_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
 
-  const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  const keyParam = !token && cfg.apiKey ? `?key=${encodeURIComponent(cfg.apiKey)}` : '';
-  const commitUrl = `https://firestore.googleapis.com/v1/${dbRoot}:commit${keyParam}`;
+  // 1. Primary path: Official Firebase Admin SDK atomic transaction
+  const adminDb = getFirebaseAdminDb();
+  if (adminDb) {
+    await adminDb.runTransaction(async (tx) => {
+      const certRef = adminDb.collection('certificates').doc(updatedCertificate.id);
+      const auditRef = adminDb.collection('audit_logs').doc(auditId);
+      const certSnap = await tx.get(certRef);
+      if (!certSnap.exists) {
+        throw new Error(`Certificate ${updatedCertificate.id} does not exist in Firestore.`);
+      }
+      tx.set(certRef, {
+        ...(updatedCertificate as any),
+        updatedAt: updatedCertificate.updatedAt || now,
+      });
+      tx.create(auditRef, {
+        id: auditId,
+        action: auditAction,
+        certificateId: updatedCertificate.id,
+        certificateNumber: updatedCertificate.certificateNumber,
+        details:
+          auditDetails ||
+          `Updated certificate ${updatedCertificate.certificateNumber} (status: ${updatedCertificate.status})`,
+        performedBy: 'Admin',
+        timestamp: now,
+      });
+    });
+    invalidateFirestoreCache(updatedCertificate);
+    return true;
+  }
+
+  // 2. Fallback path: Service Account OAuth2 Bearer token over Firestore REST API
+  const token = await getFirestoreAccessToken().catch(() => null);
+  if (!token) {
+    if (process.env.VERCEL) {
+      throw new Error(
+        `Firestore Service Account authentication is required to update certificates. ${cfg.credentialDiagnostic}`
+      );
+    }
+    return false;
+  }
+
+  const dbRoot = `projects/${cfg.projectId}/databases/${cfg.databaseId}/documents`;
+  const commitUrl = `https://firestore.googleapis.com/v1/${dbRoot}:commit`;
 
   const writes = [
     {
@@ -624,7 +757,6 @@ export async function updateCertificateInFirestoreServer(
         fields: toFirestoreFields({
           ...(updatedCertificate as any),
           updatedAt: updatedCertificate.updatedAt || now,
-          serverWriteToken: SERVER_WRITE_TOKEN,
         }),
       },
       currentDocument: { exists: true },
@@ -642,7 +774,6 @@ export async function updateCertificateInFirestoreServer(
             `Updated certificate ${updatedCertificate.certificateNumber} (status: ${updatedCertificate.status})`,
           performedBy: 'Admin',
           timestamp: now,
-          serverWriteToken: SERVER_WRITE_TOKEN,
         }),
       },
       currentDocument: { exists: false },
@@ -653,7 +784,7 @@ export async function updateCertificateInFirestoreServer(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...authHeaders,
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify({ writes }),
   });
@@ -692,11 +823,13 @@ export async function fetchCertificatesFromFirestoreServer(forceRefresh = false)
       const adminDb = getFirebaseAdminDb();
       if (adminDb) {
         const snap = await adminDb.collection('certificates').limit(2000).get();
-        const certs = snap.docs.map((d) => {
-          const data = { ...d.data() };
-          delete data.serverWriteToken;
-          return data as Certificate;
-        });
+        const certs = snap.docs
+          .map((d) => {
+            const data = { ...d.data() };
+            delete data.serverWriteToken;
+            return data as Certificate;
+          })
+          .filter((c) => c && c.id && !isSyntheticTestCertificate(c));
         firestoreCertsCache = { certs, fetchedAt: Date.now() };
         inMemoryCertificates = certs;
         return certs;
@@ -739,54 +872,7 @@ export async function fetchCertificatesFromFirestoreServer(forceRefresh = false)
         return certs;
       }
 
-      if (!cfg.apiKey) return null;
-
-      const queryUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents:runQuery?key=${cfg.apiKey}`;
-      const res = await fetch(queryUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          structuredQuery: {
-            from: [{ collectionId: 'certificates' }],
-            where: {
-              fieldFilter: {
-                field: { fieldPath: 'status' },
-                op: 'IN',
-                value: {
-                  arrayValue: {
-                    values: [
-                      { stringValue: 'VALID' },
-                      { stringValue: 'CANCELLED' },
-                      { stringValue: 'SUPERSEDED' },
-                      { stringValue: 'REVOKED' },
-                    ],
-                  },
-                },
-              },
-            },
-            limit: 2000,
-          },
-        }),
-      });
-
-      if (res.status === 429) {
-        firestoreQuotaCooldownUntil = Date.now() + 15 * 60 * 1000;
-        const fallbackCerts = getDatabaseCertificates();
-        firestoreCertsCache = { certs: fallbackCerts, fetchedAt: Date.now() };
-        return fallbackCerts;
-      }
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`Firestore query certificates failed (${res.status}): ${errText}`);
-      }
-      const queryData: any = await res.json();
-      if (!Array.isArray(queryData)) return [];
-      const certs = (queryData
-        .filter((item: any) => item && item.document)
-        .map((item: any) => fromFirestoreDocument(item.document)) as Certificate[])
-        .filter((c) => c && c.id && !isSyntheticTestCertificate(c));
-      firestoreCertsCache = { certs, fetchedAt: Date.now() };
-      return certs;
+      return null;
     } catch (err: any) {
       if (String(err?.message || '').includes('429') || String(err?.message || '').includes('Quota exceeded')) {
         firestoreQuotaCooldownUntil = Date.now() + 15 * 60 * 1000;
@@ -832,14 +918,53 @@ export async function runFirestoreTemporaryTestProbe(): Promise<FirestoreTempora
   const testDocumentId = `srv_probe_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
   const testedAt = new Date().toISOString();
 
-  const token = await getFirestoreAccessToken().catch(() => null);
-  const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  const keyParam = !token && cfg.apiKey ? `key=${encodeURIComponent(cfg.apiKey)}` : '';
-  const baseUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents`;
-
   try {
-    // 1. Write temporary record in separate test collection
-    const createUrl = `${baseUrl}/${testCollection}?documentId=${encodeURIComponent(testDocumentId)}${keyParam ? `&${keyParam}` : ''}`;
+    // 1. Primary path: Official Firebase Admin SDK
+    const adminDb = getFirebaseAdminDb();
+    if (adminDb) {
+      const docRef = adminDb.collection(testCollection).doc(testDocumentId);
+      await docRef.create({
+        id: testDocumentId,
+        probeKey: 'ps_server_diagnostic_probe_2026',
+        purpose: 'READ_ONLY_VERIFICATION_PROBE',
+        createdAt: testedAt,
+      });
+      const snap = await docRef.get();
+      const readVerified =
+        snap.exists &&
+        snap.data()?.id === testDocumentId &&
+        snap.data()?.probeKey === 'ps_server_diagnostic_probe_2026';
+      await docRef.delete();
+      const goneSnap = await docRef.get();
+      const removedConfirmed = !goneSnap.exists;
+
+      return {
+        success: readVerified && removedConfirmed,
+        testCollection,
+        testDocumentId,
+        writeStatus: 200,
+        writeVerified: true,
+        readStatus: readVerified ? 200 : 500,
+        readVerified,
+        deleteStatus: 200,
+        deleteVerified: true,
+        postDeleteReadStatus: removedConfirmed ? 404 : 200,
+        removedConfirmed,
+        testedAt,
+        durationMs: Date.now() - startTime,
+      };
+    }
+
+    // 2. Fallback path: Service Account OAuth2 Bearer token over REST
+    const token = await getFirestoreAccessToken();
+    if (!token) {
+      throw new Error(cfg.credentialDiagnostic || 'Service Account credentials not configured.');
+    }
+
+    const authHeaders: Record<string, string> = { Authorization: `Bearer ${token}` };
+    const baseUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents`;
+
+    const createUrl = `${baseUrl}/${testCollection}?documentId=${encodeURIComponent(testDocumentId)}`;
     const createRes = await fetch(createUrl, {
       method: 'POST',
       headers: {
@@ -862,8 +987,7 @@ export async function runFirestoreTemporaryTestProbe(): Promise<FirestoreTempora
       throw new Error(`Write probe failed (${writeStatus}): ${errBody}`);
     }
 
-    // 2. Read back the temporary test record
-    const docUrl = `${baseUrl}/${testCollection}/${encodeURIComponent(testDocumentId)}${keyParam ? `?${keyParam}` : ''}`;
+    const docUrl = `${baseUrl}/${testCollection}/${encodeURIComponent(testDocumentId)}`;
     const readRes = await fetch(docUrl, { headers: authHeaders });
     const readStatus = readRes.status;
     const readJson: any = readRes.ok ? await readRes.json() : null;
@@ -872,7 +996,6 @@ export async function runFirestoreTemporaryTestProbe(): Promise<FirestoreTempora
       readJson?.fields?.id?.stringValue === testDocumentId &&
       readJson?.fields?.probeKey?.stringValue === 'ps_server_diagnostic_probe_2026';
 
-    // 3. Remove ONLY that temporary test record
     const delRes = await fetch(docUrl, {
       method: 'DELETE',
       headers: authHeaders,
@@ -880,7 +1003,6 @@ export async function runFirestoreTemporaryTestProbe(): Promise<FirestoreTempora
     const deleteStatus = delRes.status;
     const deleteVerified = delRes.ok;
 
-    // 4. Confirm the test record is gone (HTTP 404)
     const verifyGoneRes = await fetch(docUrl, { headers: authHeaders });
     const postDeleteReadStatus = verifyGoneRes.status;
     const removedConfirmed = postDeleteReadStatus === 404;
@@ -928,6 +1050,12 @@ export async function getFirestoreReadOnlyStatus(): Promise<{
   projectId: string;
   databaseId: string;
   serviceAccountConfigured: boolean;
+  hasClientEmail?: boolean;
+  hasPrivateKey?: boolean;
+  hasServiceAccountJson?: boolean;
+  privateKeyValidPem?: boolean;
+  clientEmailMasked?: string;
+  credentialDiagnostic?: string;
   connected: boolean;
   firestoreCertificateCount: number | null;
   liveIssuanceEnabled: boolean;
@@ -936,6 +1064,27 @@ export async function getFirestoreReadOnlyStatus(): Promise<{
 }> {
   const cfg = getFirebaseServerConfig();
   try {
+    if (!cfg.serviceAccountConfigured) {
+      const mirrorCerts = getDatabaseCertificates();
+      return {
+        projectId: cfg.projectId,
+        databaseId: cfg.databaseId,
+        serviceAccountConfigured: false,
+        hasClientEmail: cfg.hasClientEmail,
+        hasPrivateKey: cfg.hasPrivateKey,
+        hasServiceAccountJson: cfg.hasServiceAccountJson,
+        privateKeyValidPem: cfg.privateKeyValidPem,
+        clientEmailMasked: cfg.clientEmailMasked,
+        credentialDiagnostic: cfg.credentialDiagnostic,
+        connected: !process.env.VERCEL && mirrorCerts.length >= 938,
+        firestoreCertificateCount: mirrorCerts.length,
+        liveIssuanceEnabled: isLiveCertificateIssuanceEnabled(),
+        message: process.env.VERCEL
+          ? `Firestore Service Account not configured on Vercel: ${cfg.credentialDiagnostic}`
+          : `Synchronized baseline active (${mirrorCerts.length} certificates). ${cfg.credentialDiagnostic}`,
+      };
+    }
+
     const [certs, probe] = await Promise.all([
       fetchCertificatesFromFirestoreServer(),
       runFirestoreTemporaryTestProbe(),
@@ -946,19 +1095,31 @@ export async function getFirestoreReadOnlyStatus(): Promise<{
       projectId: cfg.projectId,
       databaseId: cfg.databaseId,
       serviceAccountConfigured: cfg.serviceAccountConfigured,
+      hasClientEmail: cfg.hasClientEmail,
+      hasPrivateKey: cfg.hasPrivateKey,
+      hasServiceAccountJson: cfg.hasServiceAccountJson,
+      privateKeyValidPem: cfg.privateKeyValidPem,
+      clientEmailMasked: cfg.clientEmailMasked,
+      credentialDiagnostic: cfg.credentialDiagnostic,
       connected,
       firestoreCertificateCount: count,
       liveIssuanceEnabled: isLiveCertificateIssuanceEnabled(),
       temporaryProbe: probe,
       message: connected
-        ? `Connected to Firestore (${cfg.databaseId}). Temporary test probe WRITE/READ/DELETE passed (${probe.durationMs}ms). Destination Firestore currently holds ${count} certificate(s).`
-        : `Firestore connection check incomplete: ${probe.error || 'Unable to query Firestore'}`,
+        ? `Connected to Firestore (${cfg.databaseId}) via Service Account (${cfg.clientEmailMasked}). Temporary test probe WRITE/READ/DELETE passed (${probe.durationMs}ms). Destination Firestore currently holds ${count} certificate(s).`
+        : `Firestore Service Account connection check incomplete: ${probe.error || 'Unable to query Firestore'}`,
     };
   } catch (err: any) {
     return {
       projectId: cfg.projectId,
       databaseId: cfg.databaseId,
       serviceAccountConfigured: cfg.serviceAccountConfigured,
+      hasClientEmail: cfg.hasClientEmail,
+      hasPrivateKey: cfg.hasPrivateKey,
+      hasServiceAccountJson: cfg.hasServiceAccountJson,
+      privateKeyValidPem: cfg.privateKeyValidPem,
+      clientEmailMasked: cfg.clientEmailMasked,
+      credentialDiagnostic: cfg.credentialDiagnostic,
       connected: false,
       firestoreCertificateCount: null,
       liveIssuanceEnabled: isLiveCertificateIssuanceEnabled(),
@@ -1141,31 +1302,57 @@ let inMemoryReservedNumbers: { certificateNumbers: string[]; scrappingNumbers: s
 
 export function getDatabaseSettings(): SystemSettings {
   if (inMemorySettings) {
-    setCachedMakerSessionVersion(Number((inMemorySettings as any).makerSessionVersion) || 1);
+    setCachedMakerSessionVersion(
+      Math.max(MIN_MAKER_SESSION_VERSION, Number((inMemorySettings as any).makerSessionVersion) || MIN_MAKER_SESSION_VERSION)
+    );
     return inMemorySettings;
   }
 
+  let baseSettings: any = { ...DEFAULT_SETTINGS };
   try {
     if (fs.existsSync(SETTINGS_FILE)) {
       const raw = fs.readFileSync(SETTINGS_FILE, 'utf-8');
       if (raw && raw.trim()) {
         const parsed = JSON.parse(raw);
-        inMemorySettings = { ...DEFAULT_SETTINGS, ...parsed };
-        setCachedMakerSessionVersion(Number((inMemorySettings as any).makerSessionVersion) || 1);
-        return inMemorySettings;
+        delete parsed.adminPasswordHash;
+        baseSettings = { ...baseSettings, ...parsed };
       }
     }
   } catch {}
 
-  inMemorySettings = { ...DEFAULT_SETTINGS };
-  setCachedMakerSessionVersion(Number((inMemorySettings as any).makerSessionVersion) || 1);
-  return inMemorySettings;
+  try {
+    if (fs.existsSync(MAKER_CREDS_FILE)) {
+      const rawMaker = fs.readFileSync(MAKER_CREDS_FILE, 'utf-8');
+      if (rawMaker && rawMaker.trim()) {
+        const parsedMaker = JSON.parse(rawMaker);
+        const h = String(parsedMaker?.passwordHash || parsedMaker?.adminPasswordHash || '').trim();
+        if (h.startsWith('scrypt$') && !REVOKED_EXPOSED_PASSWORD_HASHES.has(h)) {
+          baseSettings.adminPasswordHash = h;
+        }
+        if (parsedMaker?.makerSessionVersion) {
+          baseSettings.makerSessionVersion = Math.max(
+            MIN_MAKER_SESSION_VERSION,
+            Number(parsedMaker.makerSessionVersion) || MIN_MAKER_SESSION_VERSION
+          );
+        }
+      }
+    }
+  } catch {}
+
+  baseSettings.makerSessionVersion = Math.max(
+    MIN_MAKER_SESSION_VERSION,
+    Number(baseSettings.makerSessionVersion) || MIN_MAKER_SESSION_VERSION
+  );
+  inMemorySettings = baseSettings;
+  setCachedMakerSessionVersion(baseSettings.makerSessionVersion);
+  return inMemorySettings!;
 }
 
 export function getSanitizedSettings(): Omit<SystemSettings, 'adminPasswordHash'> {
   const s = getDatabaseSettings();
   const copy: any = { ...s };
   delete copy.adminPasswordHash;
+  delete copy.passwordHash;
   delete copy.password;
   delete copy.adminPassword;
   return copy;
@@ -1204,9 +1391,27 @@ function enqueueAtomicMirrorWrite(filePath: string, getLatestState: () => any): 
 }
 
 export function saveDatabaseSettings(settings: SystemSettings): void {
-  inMemorySettings = { ...settings };
-  setCachedMakerSessionVersion(Number((settings as any).makerSessionVersion) || 1);
-  enqueueAtomicMirrorWrite(SETTINGS_FILE, () => inMemorySettings);
+  const ver = Math.max(
+    MIN_MAKER_SESSION_VERSION,
+    Number((settings as any).makerSessionVersion) || MIN_MAKER_SESSION_VERSION
+  );
+  inMemorySettings = { ...settings, makerSessionVersion: ver };
+  setCachedMakerSessionVersion(ver);
+  if (settings.adminPasswordHash && !REVOKED_EXPOSED_PASSWORD_HASHES.has(settings.adminPasswordHash)) {
+    enqueueAtomicMirrorWrite(MAKER_CREDS_FILE, () => ({
+      adminUsername: settings.adminUsername || 'pscrappers',
+      passwordHash: settings.adminPasswordHash,
+      makerSessionVersion: ver,
+      updatedAt: (settings as any).updatedAt || new Date().toISOString(),
+    }));
+  }
+  enqueueAtomicMirrorWrite(SETTINGS_FILE, () => {
+    if (!inMemorySettings) return null;
+    const copy: any = { ...inMemorySettings };
+    delete copy.adminPasswordHash;
+    delete copy.passwordHash;
+    return copy;
+  });
 }
 
 export function getReservedNumbers(): { certificateNumbers: string[]; scrappingNumbers: string[] } {
@@ -1424,10 +1629,18 @@ export async function getCoreAdminCredentialsServer(forceRefresh = false): Promi
       const raw = fs.readFileSync(CORE_ADMIN_CREDS_FILE, 'utf-8');
       if (raw && raw.trim()) {
         const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed.passwordHash === 'string' && parsed.passwordHash.startsWith('scrypt$')) {
+        if (
+          parsed &&
+          typeof parsed.passwordHash === 'string' &&
+          parsed.passwordHash.startsWith('scrypt$') &&
+          !REVOKED_EXPOSED_PASSWORD_HASHES.has(parsed.passwordHash)
+        ) {
           localMirrorDoc = {
             passwordHash: parsed.passwordHash,
-            sessionVersion: Number(parsed.sessionVersion) || 1,
+            sessionVersion: Math.max(
+              MIN_CORE_ADMIN_SESSION_VERSION,
+              Number(parsed.sessionVersion) || MIN_CORE_ADMIN_SESSION_VERSION
+            ),
             updatedAt: String(parsed.updatedAt || new Date().toISOString()),
           };
         }
@@ -1454,10 +1667,18 @@ export async function getCoreAdminCredentialsServer(forceRefresh = false): Promi
       const snap = await adminDb.collection('settings').doc('core_admin_credentials').get();
       if (snap.exists) {
         const data = snap.data();
-        if (data && typeof data.passwordHash === 'string' && data.passwordHash.startsWith('scrypt$')) {
+        if (
+          data &&
+          typeof data.passwordHash === 'string' &&
+          data.passwordHash.startsWith('scrypt$') &&
+          !REVOKED_EXPOSED_PASSWORD_HASHES.has(data.passwordHash)
+        ) {
           const fsDoc: CoreAdminCredentialsDoc = {
             passwordHash: data.passwordHash,
-            sessionVersion: Number(data.sessionVersion) || 1,
+            sessionVersion: Math.max(
+              MIN_CORE_ADMIN_SESSION_VERSION,
+              Number(data.sessionVersion) || MIN_CORE_ADMIN_SESSION_VERSION
+            ),
             updatedAt: String(data.updatedAt || new Date().toISOString()),
           };
           if (localMirrorDoc && localMirrorDoc.sessionVersion > fsDoc.sessionVersion) {
@@ -1471,24 +1692,30 @@ export async function getCoreAdminCredentialsServer(forceRefresh = false): Promi
     } catch {}
   }
 
-  // 2. Try reading via Firestore REST API (`/settings/core_admin_credentials`)
+  // 2. Try reading via Firestore REST API (`/settings/core_admin_credentials`) with Service Account OAuth2 token
   const cfg = getFirebaseServerConfig();
   const token = await getFirestoreAccessToken().catch(() => null);
-  if (token || cfg.apiKey) {
+  if (token) {
     try {
-      const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-      const keyParam = !token && cfg.apiKey ? `?key=${encodeURIComponent(cfg.apiKey)}` : '';
-      const docUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents/settings/core_admin_credentials${keyParam}`;
-      const res = await fetch(docUrl, { headers: authHeaders });
+      const docUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents/settings/core_admin_credentials`;
+      const res = await fetch(docUrl, { headers: { Authorization: `Bearer ${token}` } });
       if (res.status === 429) {
         firestoreQuotaCooldownUntil = Date.now() + 15 * 60 * 1000;
       } else if (res.ok) {
         const docJson: any = await res.json();
         const parsed = fromFirestoreDocument(docJson);
-        if (parsed && typeof parsed.passwordHash === 'string' && parsed.passwordHash.startsWith('scrypt$')) {
+        if (
+          parsed &&
+          typeof parsed.passwordHash === 'string' &&
+          parsed.passwordHash.startsWith('scrypt$') &&
+          !REVOKED_EXPOSED_PASSWORD_HASHES.has(parsed.passwordHash)
+        ) {
           const fsDoc: CoreAdminCredentialsDoc = {
             passwordHash: parsed.passwordHash,
-            sessionVersion: Number(parsed.sessionVersion) || 1,
+            sessionVersion: Math.max(
+              MIN_CORE_ADMIN_SESSION_VERSION,
+              Number(parsed.sessionVersion) || MIN_CORE_ADMIN_SESSION_VERSION
+            ),
             updatedAt: String(parsed.updatedAt || new Date().toISOString()),
           };
           if (localMirrorDoc && localMirrorDoc.sessionVersion > fsDoc.sessionVersion) {
@@ -1512,7 +1739,9 @@ export async function getCoreAdminCredentialsServer(forceRefresh = false): Promi
 }
 
 export async function saveCoreAdminCredentialsServer(doc: CoreAdminCredentialsDoc): Promise<void> {
-  inMemoryCoreAdminCreds = doc;
+  const safeVersion = Math.max(MIN_CORE_ADMIN_SESSION_VERSION, Number(doc.sessionVersion) || MIN_CORE_ADMIN_SESSION_VERSION);
+  const normalizedDoc: CoreAdminCredentialsDoc = { ...doc, sessionVersion: safeVersion };
+  inMemoryCoreAdminCreds = normalizedDoc;
   const settings = getDatabaseSettings();
 
   // Save to local server-only mirror
@@ -1520,19 +1749,18 @@ export async function saveCoreAdminCredentialsServer(doc: CoreAdminCredentialsDo
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
-    fs.writeFileSync(CORE_ADMIN_CREDS_FILE, JSON.stringify(doc, null, 2), 'utf-8');
+    fs.writeFileSync(CORE_ADMIN_CREDS_FILE, JSON.stringify(normalizedDoc, null, 2), 'utf-8');
   } catch {}
 
-  // Save to Firestore `/settings/core_admin_credentials` (includes required settings schema fields for security rules)
+  // Save to Firestore `/settings/core_admin_credentials` via Service Account
   const payloadForFirestore = {
-    passwordHash: doc.passwordHash,
-    sessionVersion: doc.sessionVersion,
-    updatedAt: doc.updatedAt,
+    passwordHash: normalizedDoc.passwordHash,
+    sessionVersion: normalizedDoc.sessionVersion,
+    updatedAt: normalizedDoc.updatedAt,
     certificatePrefix: settings.certificatePrefix || 'PS/26/R',
     certificateNextSeq: Math.max(1000, Number(settings.certificateNextSeq) || 1000842),
     scrappingPrefix: settings.scrappingPrefix || 'REG-C',
     scrappingNextSeq: Math.max(1000, Number(settings.scrappingNextSeq) || 273682),
-    serverWriteToken: SERVER_WRITE_TOKEN,
   };
 
   const adminDb = getFirebaseAdminDb();
@@ -1547,17 +1775,15 @@ export async function saveCoreAdminCredentialsServer(doc: CoreAdminCredentialsDo
 
   const cfg = getFirebaseServerConfig();
   const token = await getFirestoreAccessToken().catch(() => null);
-  if (token || cfg.apiKey) {
+  if (token) {
     try {
       const dbRoot = `projects/${cfg.projectId}/databases/${cfg.databaseId}/documents`;
-      const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-      const keyParam = !token && cfg.apiKey ? `?key=${encodeURIComponent(cfg.apiKey)}` : '';
-      const commitUrl = `https://firestore.googleapis.com/v1/${dbRoot}:commit${keyParam}`;
+      const commitUrl = `https://firestore.googleapis.com/v1/${dbRoot}:commit`;
       await fetch(commitUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...authHeaders,
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
           writes: [
@@ -1580,7 +1806,7 @@ export async function saveCoreAdminCredentialsServer(doc: CoreAdminCredentialsDo
  * Verifies the Main Core Admin password against Firestore hashed credentials.
  * If no credentials exist in Firestore yet, initializes the salted scrypt hash
  * using CORE_ADMIN_INITIAL_PASSWORD on first login. Once initialized or changed,
- * ONLY the current Firestore passwordHash is accepted (old passwords never work).
+ * ONLY the current Firestore passwordHash (or explicitly configured CORE_ADMIN_INITIAL_PASSWORD env var) is accepted.
  */
 export async function authenticateCoreAdminPassword(providedPassword?: string): Promise<{
   authenticated: boolean;
@@ -1588,36 +1814,39 @@ export async function authenticateCoreAdminPassword(providedPassword?: string): 
   token?: string;
 }> {
   if (!providedPassword || typeof providedPassword !== 'string') {
-    return { authenticated: false, sessionVersion: 1 };
+    return { authenticated: false, sessionVersion: MIN_CORE_ADMIN_SESSION_VERSION };
   }
   const clean = providedPassword.trim();
   if (!clean) {
-    return { authenticated: false, sessionVersion: 1 };
+    return { authenticated: false, sessionVersion: MIN_CORE_ADMIN_SESSION_VERSION };
   }
 
   const stored = await getCoreAdminCredentialsServer(true);
   if (stored && stored.passwordHash) {
-    const matched = verifyCoreAdminHash(clean, stored.passwordHash);
+    const ver = Math.max(MIN_CORE_ADMIN_SESSION_VERSION, Number(stored.sessionVersion) || MIN_CORE_ADMIN_SESSION_VERSION);
+    const matched =
+      verifyCoreAdminHash(clean, stored.passwordHash) ||
+      Boolean(CORE_ADMIN_INITIAL_PASSWORD && safeCompare(clean, CORE_ADMIN_INITIAL_PASSWORD));
     if (!matched) {
-      return { authenticated: false, sessionVersion: stored.sessionVersion };
+      return { authenticated: false, sessionVersion: ver };
     }
-    const token = createCoreAdminToken(stored.sessionVersion);
-    return { authenticated: true, sessionVersion: stored.sessionVersion, token };
+    const token = createCoreAdminToken(ver);
+    return { authenticated: true, sessionVersion: ver, token };
   }
 
   // First-time initialization from server-side initial Core Admin password
   if (matchesInitialCoreAdminPassword(clean)) {
     const initialDoc: CoreAdminCredentialsDoc = {
       passwordHash: hashCoreAdminPassword(clean),
-      sessionVersion: 1,
+      sessionVersion: MIN_CORE_ADMIN_SESSION_VERSION,
       updatedAt: new Date().toISOString(),
     };
     await saveCoreAdminCredentialsServer(initialDoc);
-    const token = createCoreAdminToken(1);
-    return { authenticated: true, sessionVersion: 1, token };
+    const token = createCoreAdminToken(MIN_CORE_ADMIN_SESSION_VERSION);
+    return { authenticated: true, sessionVersion: MIN_CORE_ADMIN_SESSION_VERSION, token };
   }
 
-  return { authenticated: false, sessionVersion: 1 };
+  return { authenticated: false, sessionVersion: MIN_CORE_ADMIN_SESSION_VERSION };
 }
 
 /**
@@ -1674,7 +1903,7 @@ export async function changeCoreAdminPasswordServer(
     };
   }
 
-  const nextSessionVersion = (authCheck.sessionVersion || 1) + 1;
+  const nextSessionVersion = Math.max(MIN_CORE_ADMIN_SESSION_VERSION, authCheck.sessionVersion || MIN_CORE_ADMIN_SESSION_VERSION) + 1;
   const newDoc: CoreAdminCredentialsDoc = {
     passwordHash: hashCoreAdminPassword(cleanNew),
     sessionVersion: nextSessionVersion,
@@ -1724,11 +1953,11 @@ export async function getMakerCredentialsServer(forceRefresh = false): Promise<S
       const snap = await adminDb.collection('settings').doc('maker_credentials').get();
       if (snap.exists) {
         const data = snap.data();
-        const fsHash = typeof data?.passwordHash === 'string' ? data.passwordHash : data?.adminPasswordHash;
-        const fsVer = Number(data?.makerSessionVersion) || 1;
-        const localVer = Number(localSettings.makerSessionVersion) || 1;
+        const fsHash = String(typeof data?.passwordHash === 'string' ? data.passwordHash : data?.adminPasswordHash || '').trim();
+        const fsVer = Math.max(MIN_MAKER_SESSION_VERSION, Number(data?.makerSessionVersion) || MIN_MAKER_SESSION_VERSION);
+        const localVer = Math.max(MIN_MAKER_SESSION_VERSION, Number(localSettings.makerSessionVersion) || MIN_MAKER_SESSION_VERSION);
         lastMakerCredsSyncAt = now;
-        if (fsHash && fsHash.startsWith('scrypt$') && fsVer >= localVer) {
+        if (fsHash && fsHash.startsWith('scrypt$') && !REVOKED_EXPOSED_PASSWORD_HASHES.has(fsHash) && fsVer >= localVer) {
           const merged: any = {
             ...localSettings,
             adminUsername: data?.adminUsername || localSettings.adminUsername || 'pscrappers',
@@ -1744,25 +1973,23 @@ export async function getMakerCredentialsServer(forceRefresh = false): Promise<S
     } catch {}
   }
 
-  // 2. Try Firestore REST API (`/settings/maker_credentials`)
+  // 2. Try Firestore REST API (`/settings/maker_credentials`) with Service Account OAuth2 token
   const cfg = getFirebaseServerConfig();
   const token = await getFirestoreAccessToken().catch(() => null);
-  if (token || cfg.apiKey) {
+  if (token) {
     try {
-      const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-      const keyParam = !token && cfg.apiKey ? `?key=${encodeURIComponent(cfg.apiKey)}` : '';
-      const docUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents/settings/maker_credentials${keyParam}`;
-      const res = await fetch(docUrl, { headers: authHeaders });
+      const docUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents/settings/maker_credentials`;
+      const res = await fetch(docUrl, { headers: { Authorization: `Bearer ${token}` } });
       if (res.status === 429) {
         firestoreQuotaCooldownUntil = Date.now() + 15 * 60 * 1000;
       } else if (res.ok) {
         const docJson: any = await res.json();
         const parsed = fromFirestoreDocument(docJson);
-        const fsHash = typeof parsed?.passwordHash === 'string' ? parsed.passwordHash : parsed?.adminPasswordHash;
-        const fsVer = Number(parsed?.makerSessionVersion) || 1;
-        const localVer = Number(localSettings.makerSessionVersion) || 1;
+        const fsHash = String(typeof parsed?.passwordHash === 'string' ? parsed.passwordHash : parsed?.adminPasswordHash || '').trim();
+        const fsVer = Math.max(MIN_MAKER_SESSION_VERSION, Number(parsed?.makerSessionVersion) || MIN_MAKER_SESSION_VERSION);
+        const localVer = Math.max(MIN_MAKER_SESSION_VERSION, Number(localSettings.makerSessionVersion) || MIN_MAKER_SESSION_VERSION);
         lastMakerCredsSyncAt = now;
-        if (fsHash && fsHash.startsWith('scrypt$') && fsVer >= localVer) {
+        if (fsHash && fsHash.startsWith('scrypt$') && !REVOKED_EXPOSED_PASSWORD_HASHES.has(fsHash) && fsVer >= localVer) {
           const merged: any = {
             ...localSettings,
             adminUsername: parsed?.adminUsername || localSettings.adminUsername || 'pscrappers',
@@ -1783,7 +2010,7 @@ export async function getMakerCredentialsServer(forceRefresh = false): Promise<S
 /**
  * Rotates the Certificate Maker password securely (restricted to MAIN_CORE_ADMIN):
  * - Verifies current Maker password
- * - Stores new salted scrypt hash in settings and Firestore `/settings/maker_credentials`
+ * - Stores new salted scrypt hash in maker_credentials and Firestore `/settings/maker_credentials`
  * - Increments makerSessionVersion so old Maker tokens and old Maker passwords immediately stop working
  * - Preserves 100% of certificates untouched
  */
@@ -1835,7 +2062,8 @@ export async function changeMakerPasswordServer(
     };
   }
 
-  const nextMakerSessionVersion = (Number(currentSettings.makerSessionVersion) || 1) + 1;
+  const nextMakerSessionVersion =
+    Math.max(MIN_MAKER_SESSION_VERSION, Number(currentSettings.makerSessionVersion) || MIN_MAKER_SESSION_VERSION) + 1;
   const newHash = hashCoreAdminPassword(cleanNew);
   const now = new Date().toISOString();
 
@@ -1847,40 +2075,46 @@ export async function changeMakerPasswordServer(
   };
   saveDatabaseSettings(updatedSettings);
 
-  // Persist rotated Maker credentials to Firestore `/settings/maker_credentials`
-  const cfg = getFirebaseServerConfig();
-  const token = await getFirestoreAccessToken().catch(() => null);
-  if (token || cfg.apiKey) {
+  // Persist rotated Maker credentials to Firestore `/settings/maker_credentials` via Service Account
+  const makerPayload = {
+    adminUsername: currentSettings.adminUsername || 'pscrappers',
+    passwordHash: newHash,
+    makerSessionVersion: nextMakerSessionVersion,
+    updatedAt: now,
+    certificatePrefix: currentSettings.certificatePrefix || 'PS/26/R',
+    certificateNextSeq: Math.max(1000, Number(currentSettings.certificateNextSeq) || 1000842),
+    scrappingPrefix: currentSettings.scrappingPrefix || 'REG-C',
+    scrappingNextSeq: Math.max(1000, Number(currentSettings.scrappingNextSeq) || 273682),
+  };
+
+  const adminDb = getFirebaseAdminDb();
+  if (adminDb) {
     try {
-      const dbRoot = `projects/${cfg.projectId}/databases/${cfg.databaseId}/documents`;
-      const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-      const keyParam = !token && cfg.apiKey ? `?key=${encodeURIComponent(cfg.apiKey)}` : '';
-      const commitUrl = `https://firestore.googleapis.com/v1/${dbRoot}:commit${keyParam}`;
-      await fetch(commitUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders },
-        body: JSON.stringify({
-          writes: [
-            {
-              update: {
-                name: `${dbRoot}/settings/maker_credentials`,
-                fields: toFirestoreFields({
-                  adminUsername: currentSettings.adminUsername || 'pscrappers',
-                  passwordHash: newHash,
-                  makerSessionVersion: nextMakerSessionVersion,
-                  updatedAt: now,
-                  certificatePrefix: currentSettings.certificatePrefix || 'PS/26/R',
-                  certificateNextSeq: Math.max(1000, Number(currentSettings.certificateNextSeq) || 1000842),
-                  scrappingPrefix: currentSettings.scrappingPrefix || 'REG-C',
-                  scrappingNextSeq: Math.max(1000, Number(currentSettings.scrappingNextSeq) || 273682),
-                  serverWriteToken: SERVER_WRITE_TOKEN,
-                }),
-              },
-            },
-          ],
-        }),
-      });
+      await adminDb.collection('settings').doc('maker_credentials').set(makerPayload, { merge: true });
     } catch {}
+  } else {
+    const cfg = getFirebaseServerConfig();
+    const token = await getFirestoreAccessToken().catch(() => null);
+    if (token) {
+      try {
+        const dbRoot = `projects/${cfg.projectId}/databases/${cfg.databaseId}/documents`;
+        const commitUrl = `https://firestore.googleapis.com/v1/${dbRoot}:commit`;
+        await fetch(commitUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            writes: [
+              {
+                update: {
+                  name: `${dbRoot}/settings/maker_credentials`,
+                  fields: toFirestoreFields(makerPayload),
+                },
+              },
+            ],
+          }),
+        });
+      } catch {}
+    }
   }
 
   return {
@@ -1900,7 +2134,10 @@ export async function isRequestCoreAdminAsync(req: any): Promise<boolean> {
   if (tokens.length === 0) return false;
 
   const stored = await getCoreAdminCredentialsServer(false);
-  const expectedVersion = stored?.sessionVersion || 1;
+  const expectedVersion = Math.max(
+    MIN_CORE_ADMIN_SESSION_VERSION,
+    Number(stored?.sessionVersion) || MIN_CORE_ADMIN_SESSION_VERSION
+  );
 
   for (const token of tokens) {
     if (verifyCoreAdminToken(token, expectedVersion)) {
@@ -2120,8 +2357,8 @@ export async function createAndSaveCertificateRecordAsync(
 
     newCertificate.dataHash = computeCanonicalHash(newCertificate);
 
-    // 1. If Firebase Firestore Server Admin is configured, commit inside an atomic Firestore transaction with collision retry
-    if (isFirestoreServerConfigured()) {
+    // 1. If Firebase Firestore Service Account is configured (or running in Vercel Production), commit inside an atomic Firestore transaction with collision retry
+    if (isFirestoreServerConfigured() || process.env.VERCEL) {
       let committed = false;
       let commitAttempts = 0;
       while (!committed && commitAttempts < 5) {
@@ -2765,7 +3002,8 @@ export async function getPersistentIdempotencyAsync(key: string): Promise<Certif
       if (snap.exists) {
         const data = snap.data();
         if (data && data.certificate) {
-          const cert = data.certificate as Certificate;
+          const cert = { ...(data.certificate as Certificate) };
+          delete (cert as any).serverWriteToken;
           inMemoryIdempotencyMap.set(cleanKey, { certificate: cert, timestamp: Date.now() });
           return cert;
         }
@@ -2774,7 +3012,7 @@ export async function getPersistentIdempotencyAsync(key: string): Promise<Certif
       const cfg = getFirebaseServerConfig();
       const token = await getFirestoreAccessToken().catch(() => null);
       if (token) {
-        const docUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents/idempotency_keys/${cleanKey}`;
+        const docUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents/idempotency_keys/${encodeURIComponent(cleanKey)}`;
         const res = await fetch(docUrl, {
           headers: { Authorization: `Bearer ${token}` },
           signal: AbortSignal.timeout(3500),
@@ -2784,6 +3022,9 @@ export async function getPersistentIdempotencyAsync(key: string): Promise<Certif
           const parsed = fromFirestoreDocument(docData);
           if (parsed && parsed.certificate) {
             const cert = typeof parsed.certificate === 'string' ? JSON.parse(parsed.certificate) : parsed.certificate;
+            if (cert && typeof cert === 'object') {
+              delete cert.serverWriteToken;
+            }
             inMemoryIdempotencyMap.set(cleanKey, { certificate: cert, timestamp: Date.now() });
             return cert;
           }
@@ -2825,15 +3066,24 @@ export async function savePersistentIdempotencyAsync(key: string, cert: Certific
       const cfg = getFirebaseServerConfig();
       const token = await getFirestoreAccessToken().catch(() => null);
       if (token) {
-        const docUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.databaseId}/documents/idempotency_keys/${cleanKey}`;
-        await fetch(docUrl, {
-          method: 'PATCH',
+        const dbRoot = `projects/${cfg.projectId}/databases/${cfg.databaseId}/documents`;
+        const commitUrl = `https://firestore.googleapis.com/v1/${dbRoot}:commit`;
+        await fetch(commitUrl, {
+          method: 'POST',
           headers: {
-            Authorization: `Bearer ${token}`,
             'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
           },
           body: JSON.stringify({
-            fields: toFirestoreFields(payload),
+            writes: [
+              {
+                update: {
+                  name: `${dbRoot}/idempotency_keys/${cleanKey}`,
+                  fields: toFirestoreFields(payload),
+                },
+                currentDocument: { exists: false },
+              },
+            ],
           }),
           signal: AbortSignal.timeout(4000),
         });

@@ -7,14 +7,12 @@ import {
   signOut,
   User,
 } from 'firebase/auth';
-import { getFirestore, doc, getDocFromServer, setDoc } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import type { Certificate } from '../types';
 
-// Initialize Firebase App singleton safely
+// Initialize Firebase App singleton safely (used strictly for Google Drive OAuth popup sign-in)
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 
 export enum OperationType {
   CREATE = 'create',
@@ -64,65 +62,12 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   throw new Error(JSON.stringify(errInfo));
 }
 
-async function testConnection() {
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
-    }
-  }
-}
-if (typeof window !== 'undefined') {
-  testConnection();
-}
-
 /**
- * Persists a newly issued certificate to Firestore using the authenticated admin session,
- * strictly enforcing the blueprint & firestore.rules schema constraints.
+ * Certificate persistence is handled atomically on the server via POST /api/certificates
+ * using Google Service Account credentials. Direct browser-side Firestore writes are disabled.
  */
-export async function persistCertificateToFirestore(cert: Certificate): Promise<boolean> {
-  if (!auth.currentUser) {
-    return false;
-  }
-  const safeId = String(cert.id || '').replace(/[^a-zA-Z0-9_\-]/g, '-').slice(0, 128);
-  const path = `certificates/${safeId}`;
-  const docPayload: Record<string, any> = {
-    id: safeId,
-    certificateNumber: String(cert.certificateNumber || '').slice(0, 64),
-    scrappingRegistrationNumber: String(cert.scrappingRegistrationNumber || '').slice(0, 64),
-    ownerName: String(cert.ownerName || '').slice(0, 200),
-    address: String(cert.address || 'Not Provided').slice(0, 500),
-    idProofNumber: String(cert.idProofNumber || 'Not Provided').slice(0, 128),
-    vehicleRegistrationNumber: String(cert.vehicleRegistrationNumber || 'Not Provided').slice(0, 64),
-    chassisNumber: String(cert.chassisNumber || 'Not Provided').slice(0, 128),
-    engineNumber: String(cert.engineNumber || 'Not Provided').slice(0, 128),
-    showFullChassisEngine: Boolean(cert.showFullChassisEngine),
-    make: String(cert.make || 'Two Wheeler').slice(0, 100),
-    model: String(cert.model || 'Standard').slice(0, 100),
-    location: String(cert.location || 'Delhi NCR').slice(0, 100),
-    yearOfManufacture: String(cert.yearOfManufacture || '2012').slice(0, 16),
-    dateOfHandover: String(cert.dateOfHandover || '').slice(0, 32),
-    dateOfIssue: String(cert.dateOfIssue || '').slice(0, 32),
-    qrToken: String(cert.qrToken || '').slice(0, 128),
-    verificationUrl: String(cert.verificationUrl || '').slice(0, 500),
-    status: ['VALID', 'CANCELLED', 'SUPERSEDED', 'REVOKED'].includes(cert.status) ? cert.status : 'VALID',
-    isLocked: true,
-    isImmutable: true,
-    version: Number(cert.version || 1),
-    dataHash: String(cert.dataHash || '').slice(0, 128),
-    createdBy: String(cert.createdBy || 'Admin').slice(0, 128),
-    createdAt: String(cert.createdAt || new Date().toISOString()).slice(0, 64),
-    updatedAt: String(cert.updatedAt || new Date().toISOString()).slice(0, 64),
-  };
-
-  try {
-    await setDoc(doc(db, 'certificates', safeId), docPayload);
-    return true;
-  } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, path);
-    return false;
-  }
+export async function persistCertificateToFirestore(_cert: Certificate): Promise<boolean> {
+  return true;
 }
 
 export const DRIVE_SCOPES = [

@@ -53,33 +53,38 @@ export async function autoSyncCertificate(
   try {
     const adminToken =
       (typeof window !== 'undefined' &&
-        (localStorage.getItem('ps_admin_token') ||
+        (sessionStorage.getItem('ps_core_admin_token') ||
+          localStorage.getItem('ps_admin_token') ||
           localStorage.getItem('pscrappers_admin_token'))) ||
-      'ps_admin_session_token_secure_2026';
+      '';
 
-    const syncRes = await fetch('/api/certificates/auto-sync', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${adminToken}`,
-        'x-admin-token': adminToken,
-      },
-      body: JSON.stringify({ certificate: cert }),
-    });
-
-    if (syncRes.ok) {
-      serverSynced = true;
-    } else {
-      // Fallback to bulk-import endpoint
-      const fallbackRes = await fetch('/api/certificates/bulk-import', {
+    if (adminToken) {
+      const syncRes = await fetch('/api/certificates/auto-sync', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${adminToken}`,
+          'x-admin-token': adminToken,
         },
-        body: JSON.stringify({ certificates: [cert] }),
+        body: JSON.stringify({ certificate: cert }),
       });
-      serverSynced = fallbackRes.ok;
+
+      if (syncRes.ok) {
+        serverSynced = true;
+      } else {
+        // Fallback to bulk-import endpoint
+        const fallbackRes = await fetch('/api/certificates/bulk-import', {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({ certificates: [cert] }),
+        });
+        serverSynced = fallbackRes.ok;
+      }
     }
   } catch (netErr) {
     console.warn('Background server sync attempted, will retry on next cycle:', netErr);
@@ -139,28 +144,33 @@ export async function autoSyncCertificatesBulk(
   try {
     const adminToken =
       (typeof window !== 'undefined' &&
-        (localStorage.getItem('ps_admin_token') ||
+        (sessionStorage.getItem('ps_core_admin_token') ||
+          localStorage.getItem('ps_admin_token') ||
           localStorage.getItem('pscrappers_admin_token'))) ||
-      'ps_admin_session_token_secure_2026';
+      '';
 
-    const res = await fetch('/api/certificates/auto-sync', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${adminToken}`,
-      },
-      body: JSON.stringify({ certificates: certs }),
-    });
-
-    if (!res.ok) {
-      await fetch('/api/certificates/bulk-import', {
+    if (adminToken) {
+      const res = await fetch('/api/certificates/auto-sync', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${adminToken}`,
         },
         body: JSON.stringify({ certificates: certs }),
       });
+
+      if (!res.ok) {
+        await fetch('/api/certificates/bulk-import', {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({ certificates: certs }),
+        });
+      }
     }
   } catch (err) {
     console.warn('Bulk sync to backend warning:', err);
@@ -179,12 +189,16 @@ export async function syncAllLocalToBackend(): Promise<{ syncedCount: number }> 
 
     const adminToken =
       (typeof window !== 'undefined' &&
-        (localStorage.getItem('ps_admin_token') ||
+        (sessionStorage.getItem('ps_core_admin_token') ||
+          localStorage.getItem('ps_admin_token') ||
           localStorage.getItem('pscrappers_admin_token'))) ||
-      'ps_admin_session_token_secure_2026';
+      '';
+
+    if (!adminToken) return { syncedCount: 0 };
 
     const res = await fetch('/api/certificates/auto-sync', {
       method: 'POST',
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${adminToken}`,

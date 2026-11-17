@@ -150,7 +150,7 @@ const DEFAULT_SETTINGS: SystemSettings = {
   scrappingNextSeq: 272840,
   warnDuplicateVehicle: true,
   adminUsername: 'pscrappers',
-  adminPasswordHash: 'scrypt$8bfa4bd94ed4d6b63865be7d06fe5a38$c547c3903fb3da071430d05b06e3e16fa582c0e0e02793c5d5b6e6c6a6e83bd34ee73d5c3c93f1ba4bd3e2842df1b3057fcdce9846f67d8b86d3f39586a83241',
+  makerSessionVersion: 4,
 };
 
 // Initial Seed Certificates (including the reference certificate and 4 more tests)
@@ -874,6 +874,7 @@ export function configureExpressApp(): express.Application {
   // Delegate platform health, system diagnostic, cron, maker auth/password rotation, and backup operations to consolidated handler
   app.use(async (req, res, next) => {
     if (
+      req.path === '/api/health' ||
       req.path.startsWith('/api/platform') ||
       req.path.startsWith('/api/system') ||
       req.path.startsWith('/api/backups') ||

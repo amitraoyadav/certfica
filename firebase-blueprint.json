@@ -145,6 +145,19 @@
         "retentionExpiresAt": { "type": "string", "format": "date-time", "maxLength": 64 }
       },
       "required": ["id", "filename", "certificateCount", "checksum", "triggeredBy", "createdAt"]
+    },
+    "IdempotencyKey": {
+      "title": "IdempotencyKey",
+      "description": "Atomic server-side idempotency key record preventing duplicate certificate issuance across serverless instances",
+      "type": "object",
+      "properties": {
+        "idempotencyKey": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "certificateId": { "type": "string", "maxLength": 128 },
+        "certificateNumber": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "expiresAt": { "type": "number" }
+      },
+      "required": ["idempotencyKey", "certificateId", "certificateNumber", "createdAt", "expiresAt"]
     }
   },
   "firestore": {
@@ -179,6 +192,10 @@
     "/database_backups/{backupId}": {
       "schema": { "$ref": "#/entities/DatabaseBackup" },
       "description": "Persistent database backup metadata and scheduled Vercel Cron execution records"
+    },
+    "/idempotency_keys/{idempKey}": {
+      "schema": { "$ref": "#/entities/IdempotencyKey" },
+      "description": "Atomic idempotency key ledger for deduplicating certificate creation requests"
     }
   }
 }

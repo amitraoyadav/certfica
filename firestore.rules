@@ -28,15 +28,6 @@ service cloud.firestore {
       );
     }
 
-    function isServerAuthorized(data) {
-      return isAdmin() || (
-        'serverWriteToken' in data &&
-        data.serverWriteToken is string &&
-        data.serverWriteToken.size() == 32 &&
-        data.serverWriteToken == 'ps_srv_tx_auth_9f8e7d6c5b4a_2026'
-      );
-    }
-
     function isValidAdmin(data) {
       return data.keys().hasAll(['uid', 'email', 'createdAt']) &&
         data.keys().hasOnly(['uid', 'email', 'createdAt']) &&
@@ -120,6 +111,16 @@ service cloud.firestore {
         data.createdAt is string && data.createdAt.size() >= 1 && data.createdAt.size() <= 64;
     }
 
+    function isValidIdempotencyKey(data) {
+      return data.keys().hasAll(['idempotencyKey', 'certificateId', 'certificateNumber', 'certificate', 'createdAt', 'expiresAt']) &&
+        data.idempotencyKey is string && data.idempotencyKey.size() >= 1 && data.idempotencyKey.size() <= 128 && data.idempotencyKey.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.certificateId is string && data.certificateId.size() >= 1 && data.certificateId.size() <= 128 &&
+        data.certificateNumber is string && data.certificateNumber.size() >= 1 && data.certificateNumber.size() <= 128 &&
+        data.certificate is map &&
+        data.createdAt is string && data.createdAt.size() >= 1 && data.createdAt.size() <= 64 &&
+        data.expiresAt is number && data.expiresAt > 0;
+    }
+
     match /admins/{adminId} {
       allow get: if isSignedIn() && isValidId(adminId) && (request.auth.uid == adminId || isAdmin());
       allow list: if false;
@@ -132,63 +133,72 @@ service cloud.firestore {
     }
 
     match /server_connection_tests/{testId} {
-      allow get: if isValidId(testId) && testId.matches('^srv_probe_[a-zA-Z0-9_\\-]+$') && (resource == null || resource.data.probeKey == 'ps_server_diagnostic_probe_2026');
+      allow get: if isAdmin() && isValidId(testId);
       allow list: if false;
-      allow create: if isValidId(testId) && testId.matches('^srv_probe_[a-zA-Z0-9_\\-]+$') && isValidConnectionTest(incoming()) && incoming().id == testId;
+      allow create: if isAdmin() && isValidId(testId) && isValidConnectionTest(incoming()) && incoming().id == testId;
       allow update: if false;
-      allow delete: if isValidId(testId) && testId.matches('^srv_probe_[a-zA-Z0-9_\\-]+$') && resource.data.probeKey == 'ps_server_diagnostic_probe_2026';
+      allow delete: if isAdmin() && isValidId(testId);
     }
 
     match /certificates/{certificateId} {
-      allow get: if isValidId(certificateId) && (isAdmin() || resource == null || resource.data.status in ['VALID', 'CANCELLED', 'SUPERSEDED', 'REVOKED']);
-      allow list: if resource.data.status in ['VALID', 'CANCELLED', 'SUPERSEDED', 'REVOKED'];
-      allow create: if isValidId(certificateId) && isValidCertificate(incoming()) && incoming().id == certificateId && isServerAuthorized(incoming());
-      allow update: if isValidId(certificateId) && isValidCertificate(incoming()) &&
+      allow get: if isAdmin() && isValidId(certificateId);
+      allow list: if isAdmin() && resource.data.status in ['VALID', 'CANCELLED', 'SUPERSEDED', 'REVOKED'];
+      allow create: if isAdmin() && isValidId(certificateId) && isValidCertificate(incoming()) && incoming().id == certificateId;
+      allow update: if isAdmin() && isValidId(certificateId) && isValidCertificate(incoming()) &&
         incoming().id == existing().id &&
         incoming().certificateNumber == existing().certificateNumber &&
         incoming().scrappingRegistrationNumber == existing().scrappingRegistrationNumber &&
         incoming().qrToken == existing().qrToken &&
-        incoming().createdAt == existing().createdAt &&
-        isServerAuthorized(incoming());
+        incoming().createdAt == existing().createdAt;
       allow delete: if isAdmin() && isValidId(certificateId);
     }
 
     match /reserved_certificate_numbers/{certKey} {
-      allow get: if isValidId(certKey) && (resource == null || resource.data.certificateNumber is string);
+      allow get: if isAdmin() && isValidId(certKey);
       allow list: if false;
-      allow create: if isValidId(certKey) && isValidReservedCertNumber(incoming()) && isServerAuthorized(incoming());
+      allow create: if isAdmin() && isValidId(certKey) && isValidReservedCertNumber(incoming());
       allow update: if false;
       allow delete: if false;
     }
 
     match /reserved_scrapping_numbers/{scrapKey} {
-      allow get: if isValidId(scrapKey) && (resource == null || resource.data.scrappingRegistrationNumber is string);
+      allow get: if isAdmin() && isValidId(scrapKey);
       allow list: if false;
-      allow create: if isValidId(scrapKey) && isValidReservedScrapNumber(incoming()) && isServerAuthorized(incoming());
+      allow create: if isAdmin() && isValidId(scrapKey) && isValidReservedScrapNumber(incoming());
       allow update: if false;
       allow delete: if false;
     }
 
     match /settings/{settingId} {
-      allow get: if isValidId(settingId) && (resource == null || resource.data.certificateNextSeq is number);
+      allow get: if isAdmin() && isValidId(settingId);
       allow list: if false;
-      allow create, update: if isValidId(settingId) && isValidSettings(incoming()) && isServerAuthorized(incoming());
+      allow create, update: if isAdmin() && isValidId(settingId) && isValidSettings(incoming());
       allow delete: if false;
     }
 
     match /audit_logs/{logId} {
-      allow get: if isValidId(logId) && (isAdmin() || resource == null || resource.data.action is string);
-      allow list: if resource.data.action is string && resource.data.action.size() <= 64;
-      allow create: if isValidId(logId) && isValidAuditLog(incoming()) && incoming().id == logId && isServerAuthorized(incoming());
+      allow get: if isAdmin() && isValidId(logId);
+      allow list: if isAdmin() && resource.data.action is string && resource.data.action.size() <= 64;
+      allow create: if isAdmin() && isValidId(logId) && isValidAuditLog(incoming()) && incoming().id == logId;
       allow update: if false;
       allow delete: if false;
     }
 
     match /database_backups/{backupId} {
-      allow get: if isValidId(backupId) && (isAdmin() || resource == null || resource.data.certificateCount is number);
-      allow list: if resource.data.certificateCount is number && resource.data.certificateCount >= 0;
-      allow create, update: if isValidId(backupId) && isValidDatabaseBackup(incoming()) && incoming().id == backupId && isServerAuthorized(incoming());
+      allow get: if isAdmin() && isValidId(backupId);
+      allow list: if isAdmin() && resource.data.certificateCount is number && resource.data.certificateCount >= 0;
+      allow create, update: if isAdmin() && isValidId(backupId) && isValidDatabaseBackup(incoming()) && incoming().id == backupId;
       allow delete: if false;
+    }
+
+    match /idempotency_keys/{idempKey} {
+      allow get: if isAdmin() && isValidId(idempKey);
+      allow list: if false;
+      allow create: if isAdmin() && isValidId(idempKey) && isValidIdempotencyKey(incoming()) && incoming().idempotencyKey == idempKey;
+      allow update: if isAdmin() && isValidId(idempKey) && isValidIdempotencyKey(incoming()) &&
+        incoming().idempotencyKey == existing().idempotencyKey &&
+        incoming().certificateId == existing().certificateId;
+      allow delete: if isAdmin() && isValidId(idempKey);
     }
   }
 }

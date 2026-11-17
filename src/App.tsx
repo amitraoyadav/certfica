@@ -30,7 +30,6 @@ import {
   getDriveAccessToken,
   initDriveAuth,
   onDriveAuthChanged,
-  persistCertificateToFirestore,
 } from './services/googleDriveAuth';
 import {
   uploadAllCertificatesToDriveOneByOne,

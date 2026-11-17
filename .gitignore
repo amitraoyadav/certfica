@@ -15,5 +15,6 @@ serviceAccountKey*.json
 *.key
 credentials*.json
 data/core_admin_credentials.json
+data/maker_credentials.json
 *.tmp.*
 

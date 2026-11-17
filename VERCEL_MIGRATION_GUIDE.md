@@ -56,17 +56,27 @@ All 8 files are generated with verified SHA-256 checksums in `/data/exports/` an
 
 ---
 
-## 4. Environment Variables for Vercel
+## 4. Environment Variables for Vercel Production
 
 ```env
-# Standard Admin Login Credentials
+# 1. Firebase Firestore Server-Side Service Account Authentication (Required for Atomic Transactions)
+# IAM Requirement: Grant 'Cloud Datastore User' (roles/datastore.user) to this Service Account in project gen-lang-client-0059461259
+FIREBASE_PROJECT_ID=gen-lang-client-0059461259
+FIREBASE_DATABASE_ID=ai-studio-parivahanscrappe-6de1b59b-dcec-4d6e-8133-a73555223c5e
+FIREBASE_CLIENT_EMAIL=<SERVICE_ACCOUNT_EMAIL@gen-lang-client-0059461259.iam.gserviceaccount.com>
+FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+# Optional alternative: provide full serviceAccountKey.json string in FIREBASE_SERVICE_ACCOUNT_JSON
+
+# 2. Standard Admin Login Credentials
 ADMIN_USERNAME=pscrappers
 ADMIN_PASSWORD=<SET_MAKER_PASSWORD_IN_VERCEL_ENV>
+CORE_ADMIN_PASSWORD=<SET_CORE_ADMIN_PASSWORD_IN_VERCEL_ENV>
 
-# Master Deletion Authorization (Protected Actions)
+# 3. Master Deletion Authorization (Protected Actions)
 ADMIN_DELETE_PASSWORD=<SET_DELETE_PASSWORD_IN_VERCEL_ENV>
 ADMIN_PROTECTED_PASSWORD=<SET_PROTECTED_PASSWORD_IN_VERCEL_ENV>
 
-# Standby Source / Live URL
+# 4. Standby Source / Live URL
 LIVE_DATABASE_URL=https://crm-parivahanscrappers.ai.studio
 ```
+

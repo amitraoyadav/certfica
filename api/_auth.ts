@@ -5,8 +5,17 @@ import path from 'path';
 let cachedMakerSessionVersion: number | null = null;
 let cachedMakerSessionVersionAt = 0;
 
+export const MIN_MAKER_SESSION_VERSION = 4;
+export const MIN_CORE_ADMIN_SESSION_VERSION = 2;
+
+// Permanently revoked scrypt hashes that were previously present in tracked files or exposed before Firestore rules lockdown
+export const REVOKED_EXPOSED_PASSWORD_HASHES = new Set<string>([
+  'scrypt$6f7d9f43f38fdd541a945856516dbabf$9162c7fddc82631f4dd35a8605af3cc2ed1a9506c3a9ff676f18a39e14740cd23c53ed522cbdf6c4625aaae13eae35c2448e04898a5a2373f36e802346387ae2',
+  'scrypt$8bfa4bd94ed4d6b63865be7d06fe5a38$c547c3903fb3da071430d05b06e3e16fa582c0e0e02793c5d5b6e6c6a6e83bd34ee73d5c3c93f1ba4bd3e2842df1b3057fcdce9846f67d8b86d3f39586a83241',
+]);
+
 export function setCachedMakerSessionVersion(version: number): void {
-  const v = Math.max(1, Number(version) || 1);
+  const v = Math.max(MIN_MAKER_SESSION_VERSION, Number(version) || MIN_MAKER_SESSION_VERSION);
   cachedMakerSessionVersion = v;
   cachedMakerSessionVersionAt = Date.now();
 }
@@ -17,12 +26,23 @@ export function getExpectedMakerSessionVersion(): number {
     return cachedMakerSessionVersion;
   }
   try {
+    const makerCredsPath = path.join(process.cwd(), 'data', 'maker_credentials.json');
+    if (fs.existsSync(makerCredsPath)) {
+      const raw = fs.readFileSync(makerCredsPath, 'utf-8');
+      if (raw && raw.trim()) {
+        const parsed = JSON.parse(raw);
+        const ver = Math.max(MIN_MAKER_SESSION_VERSION, Number(parsed?.makerSessionVersion) || MIN_MAKER_SESSION_VERSION);
+        cachedMakerSessionVersion = ver;
+        cachedMakerSessionVersionAt = now;
+        return ver;
+      }
+    }
     const settingsPath = path.join(process.cwd(), 'data', 'settings.json');
     if (fs.existsSync(settingsPath)) {
       const raw = fs.readFileSync(settingsPath, 'utf-8');
       if (raw && raw.trim()) {
         const parsed = JSON.parse(raw);
-        const ver = Math.max(1, Number(parsed?.makerSessionVersion) || 1);
+        const ver = Math.max(MIN_MAKER_SESSION_VERSION, Number(parsed?.makerSessionVersion) || MIN_MAKER_SESSION_VERSION);
         cachedMakerSessionVersion = ver;
         cachedMakerSessionVersionAt = now;
         return ver;
@@ -32,7 +52,7 @@ export function getExpectedMakerSessionVersion(): number {
   if (cachedMakerSessionVersion !== null) {
     return cachedMakerSessionVersion;
   }
-  return 1;
+  return MIN_MAKER_SESSION_VERSION;
 }
 
 function cleanEnvValue(val: string | undefined, fallback = ''): string {
@@ -44,7 +64,7 @@ function cleanEnvValue(val: string | undefined, fallback = ''): string {
 
 export const SESSION_SECRET = cleanEnvValue(
   process.env.SESSION_SECRET || process.env.MAIN_ADMIN_PASSWORD,
-  'ps_hmac_v3_signing_key_2026_parivahan'
+  'ps_hmac_v4_incident_rotated_key_2026_parivahan'
 );
 
 // Precomputed SHA-256 digests for initial fallback credentials when environment variables are unset
@@ -100,17 +120,22 @@ export function hashCoreAdminPassword(password: string): string {
 }
 
 /**
- * Verifies a plaintext password against a stored salted scrypt hash
+ * Verifies a plaintext password against a stored salted scrypt hash.
+ * Rejects any previously exposed hash in REVOKED_EXPOSED_PASSWORD_HASHES.
  */
 export function verifyCoreAdminHash(password: string, storedHash: string): boolean {
   if (!password || !storedHash || typeof password !== 'string' || typeof storedHash !== 'string') {
     return false;
   }
+  const cleanHash = storedHash.trim();
+  if (REVOKED_EXPOSED_PASSWORD_HASHES.has(cleanHash)) {
+    return false;
+  }
   const clean = password.trim();
   if (!clean) return false;
 
-  if (storedHash.startsWith('scrypt$')) {
-    const parts = storedHash.split('$');
+  if (cleanHash.startsWith('scrypt$')) {
+    const parts = cleanHash.split('$');
     if (parts.length !== 3) return false;
     const [, salt, expectedHex] = parts;
     if (!salt || !expectedHex) return false;
@@ -140,7 +165,7 @@ export function matchesInitialCoreAdminPassword(candidate: string): boolean {
 
 /**
  * Validates normal Certificate Maker login username and password on the server.
- * Supports rotation via Firestore/settings salted scrypt hash or ADMIN_PASSWORD environment variable.
+ * Supports rotation via Firestore/maker_credentials salted scrypt hash or ADMIN_PASSWORD environment variable.
  * Normal login grants ONLY CERTIFICATE_MAKER permissions.
  */
 export function verifyAdminCredentials(
@@ -174,31 +199,30 @@ export function verifyAdminCredentials(
   if (!userMatched) return false;
 
   const storedHash = (customSettings?.adminPasswordHash || '').trim();
-  const makerVer = Number(customSettings?.makerSessionVersion) || 1;
+  const hasActiveRotatedHash =
+    storedHash.startsWith('scrypt$') && !REVOKED_EXPOSED_PASSWORD_HASHES.has(storedHash);
 
-  // 1. If Maker password has been explicitly rotated in Firestore/settings (makerSessionVersion > 1),
-  // enforce ONLY the rotated scrypt hash so the old password is immediately invalidated.
-  if (storedHash.startsWith('scrypt$') && makerVer > 1) {
-    return verifyCoreAdminHash(cleanPass, storedHash);
-  }
-
-  // 2. If ADMIN_PASSWORD environment variable is explicitly set on the server, enforce it (or stored scrypt hash).
-  if (ADMIN_PASSWORD) {
-    if (safeCompare(cleanPass, ADMIN_PASSWORD) || safeCompare(cleanPass.toLowerCase(), ADMIN_PASSWORD.toLowerCase())) {
+  // 1. If Maker password has an active rotated scrypt hash in Firestore/maker_credentials,
+  // enforce the rotated scrypt hash (or ADMIN_PASSWORD env var if explicitly rotated in Vercel).
+  if (hasActiveRotatedHash) {
+    if (verifyCoreAdminHash(cleanPass, storedHash)) {
       return true;
     }
-    if (storedHash.startsWith('scrypt$') && verifyCoreAdminHash(cleanPass, storedHash)) {
+    if (ADMIN_PASSWORD && (safeCompare(cleanPass, ADMIN_PASSWORD) || safeCompare(cleanPass.toLowerCase(), ADMIN_PASSWORD.toLowerCase()))) {
       return true;
     }
     return false;
   }
 
-  // 3. Verify against stored scrypt hash if present
-  if (storedHash.startsWith('scrypt$') && verifyCoreAdminHash(cleanPass, storedHash)) {
-    return true;
+  // 2. If ADMIN_PASSWORD environment variable is explicitly set on the server, enforce it.
+  if (ADMIN_PASSWORD) {
+    if (safeCompare(cleanPass, ADMIN_PASSWORD) || safeCompare(cleanPass.toLowerCase(), ADMIN_PASSWORD.toLowerCase())) {
+      return true;
+    }
+    return false;
   }
 
-  // 4. Verify against precomputed SHA-256 digests of initial Maker credentials
+  // 3. Verify against precomputed SHA-256 digests of Maker credentials
   const passSha256 = crypto.createHash('sha256').update(cleanPass).digest('hex');
   return (
     safeCompare(passSha256, INITIAL_MAKER_PASS_SHA256) ||
@@ -214,29 +238,30 @@ export function verifyAdminCredentials(
 export function createAdminSessionToken(username = 'pscrappers', sessionVersion?: number): string {
   const timestamp = Date.now();
   const resolvedVersion = sessionVersion !== undefined ? sessionVersion : getExpectedMakerSessionVersion();
-  const ver = Math.max(1, Number(resolvedVersion) || 1);
+  const ver = Math.max(MIN_MAKER_SESSION_VERSION, Number(resolvedVersion) || MIN_MAKER_SESSION_VERSION);
   const userLower = username.toLowerCase();
-  if (ver > 1) {
-    const payload = `admin:v${ver}:${userLower}:${timestamp}`;
-    const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
-    return `adm.v${ver}.${Buffer.from(userLower).toString('base64url')}.${timestamp}.${sig}`;
-  }
-  const payload = `admin:${userLower}:${timestamp}`;
+  const payload = `admin:v${ver}:${userLower}:${timestamp}`;
   const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
-  return `adm.${Buffer.from(userLower).toString('base64url')}.${timestamp}.${sig}`;
+  return `adm.v${ver}.${Buffer.from(userLower).toString('base64url')}.${timestamp}.${sig}`;
 }
 
 /**
- * Validates a Certificate Maker session token against expected sessionVersion
+ * Validates a Certificate Maker session token against expected sessionVersion.
+ * All legacy tokens (ps_admin_session_token_secure_2026, unversioned adm.*, or v < MIN_MAKER_SESSION_VERSION) are rejected.
  */
 export function isAdminTokenValid(token?: string, expectedSessionVersion?: number): boolean {
   if (!token || typeof token !== 'string') return false;
   const clean = token.trim();
   if (!clean) return false;
 
+  // Explicitly reject static legacy token
+  if (safeCompare(clean, LEGACY_ADMIN_SESSION_TOKEN)) {
+    return false;
+  }
+
   const resolvedExpectedVersion =
     expectedSessionVersion !== undefined
-      ? Math.max(1, Number(expectedSessionVersion) || 1)
+      ? Math.max(MIN_MAKER_SESSION_VERSION, Number(expectedSessionVersion) || MIN_MAKER_SESSION_VERSION)
       : getExpectedMakerSessionVersion();
 
   if (clean.startsWith('adm.v')) {
@@ -248,7 +273,7 @@ export function isAdminTokenValid(token?: string, expectedSessionVersion?: numbe
         const timestamp = parseInt(parts[3], 10);
         const providedSig = parts[4];
         if (isNaN(ver) || isNaN(timestamp)) return false;
-        if (ver !== resolvedExpectedVersion) return false;
+        if (ver < MIN_MAKER_SESSION_VERSION || ver !== resolvedExpectedVersion) return false;
         if (Date.now() - timestamp > ADMIN_SESSION_TIMEOUT_MS) return false;
         const payload = `admin:v${ver}:${username}:${timestamp}`;
         const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
@@ -260,30 +285,7 @@ export function isAdminTokenValid(token?: string, expectedSessionVersion?: numbe
     return false;
   }
 
-  if (clean.startsWith('adm.')) {
-    if (resolvedExpectedVersion > 1) return false;
-    const parts = clean.split('.');
-    if (parts.length === 4) {
-      try {
-        const username = Buffer.from(parts[1], 'base64url').toString('utf-8');
-        const timestamp = parseInt(parts[2], 10);
-        const providedSig = parts[3];
-        if (isNaN(timestamp)) return false;
-        if (Date.now() - timestamp > ADMIN_SESSION_TIMEOUT_MS) return false;
-        const payload = `admin:${username}:${timestamp}`;
-        const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
-        return safeCompare(providedSig, expectedSig);
-      } catch {
-        return false;
-      }
-    }
-    return false;
-  }
-
-  if (resolvedExpectedVersion === 1 && safeCompare(clean, LEGACY_ADMIN_SESSION_TOKEN)) {
-    return true;
-  }
-
+  // Unversioned tokens are permanently rejected
   return false;
 }
 
@@ -292,9 +294,9 @@ export function isAdminTokenValid(token?: string, expectedSessionVersion?: numbe
  * Whenever the Core Admin password is changed, sessionVersion increments in Firestore,
  * immediately invalidating all previously issued Core Admin tokens.
  */
-export function createCoreAdminToken(sessionVersion = 1): string {
+export function createCoreAdminToken(sessionVersion = MIN_CORE_ADMIN_SESSION_VERSION): string {
   const timestamp = Date.now();
-  const ver = Math.max(1, Number(sessionVersion) || 1);
+  const ver = Math.max(MIN_CORE_ADMIN_SESSION_VERSION, Number(sessionVersion) || MIN_CORE_ADMIN_SESSION_VERSION);
   const payload = `core-admin:v${ver}:${timestamp}`;
   const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
   return `ca.${ver}.${timestamp}.${sig}`;
@@ -303,7 +305,10 @@ export function createCoreAdminToken(sessionVersion = 1): string {
 /**
  * Verifies a Main Core Admin token against the current expected sessionVersion
  */
-export function verifyCoreAdminToken(token: string | undefined, expectedSessionVersion = 1): boolean {
+export function verifyCoreAdminToken(
+  token: string | undefined,
+  expectedSessionVersion = MIN_CORE_ADMIN_SESSION_VERSION
+): boolean {
   if (!token || typeof token !== 'string') return false;
   const clean = token.trim();
   if (!clean.startsWith('ca.')) return false;
@@ -315,8 +320,13 @@ export function verifyCoreAdminToken(token: string | undefined, expectedSessionV
   const timestamp = parseInt(parts[2], 10);
   const providedSig = parts[3];
 
+  const resolvedExpected = Math.max(
+    MIN_CORE_ADMIN_SESSION_VERSION,
+    Number(expectedSessionVersion) || MIN_CORE_ADMIN_SESSION_VERSION
+  );
+
   if (isNaN(ver) || isNaN(timestamp)) return false;
-  if (ver !== expectedSessionVersion) return false;
+  if (ver < MIN_CORE_ADMIN_SESSION_VERSION || ver !== resolvedExpected) return false;
   if (Date.now() - timestamp > MAIN_ADMIN_TIMEOUT_MS) return false;
 
   const payload = `core-admin:v${ver}:${timestamp}`;

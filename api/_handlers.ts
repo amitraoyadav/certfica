@@ -22,7 +22,7 @@ import {
   getPersistentIdempotencyAsync,
   savePersistentIdempotencyAsync,
   isSyntheticTestCertificate,
-  SERVER_WRITE_TOKEN,
+  getFirebaseServerConfig,
 } from './_db.js';
 import {
   verifyAdminCredentials,
@@ -148,11 +148,23 @@ export async function handleApiRequest(req: any, res: any) {
   // 1. Health check: /api/health
   // ----------------------------------------------------
   if (pathname === '/api/health') {
+    const fbCfg = getFirebaseServerConfig();
     return res.status(200).json({
       status: 'UP',
       uptime: process.uptime(),
       timestamp: new Date().toISOString(),
       platform: 'Vercel Serverless (Consolidated Router)',
+      firestoreAuth: {
+        projectId: fbCfg.projectId,
+        databaseId: fbCfg.databaseId,
+        serviceAccountConfigured: fbCfg.serviceAccountConfigured,
+        hasClientEmail: fbCfg.hasClientEmail,
+        hasPrivateKey: fbCfg.hasPrivateKey,
+        hasServiceAccountJson: fbCfg.hasServiceAccountJson,
+        privateKeyValidPem: fbCfg.privateKeyValidPem,
+        clientEmailMasked: fbCfg.clientEmailMasked || null,
+        credentialDiagnostic: fbCfg.credentialDiagnostic,
+      },
     });
   }
 
@@ -1232,7 +1244,6 @@ export async function handleApiRequest(req: any, res: any) {
           triggeredBy: 'VERCEL_CRON',
           createdAt: nowIso,
           retentionExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-          serverWriteToken: SERVER_WRITE_TOKEN,
         };
         const auditDoc = {
           id: auditId,
@@ -1240,7 +1251,6 @@ export async function handleApiRequest(req: any, res: any) {
           details: `Scheduled daily backup ${filename} verified (${certs.length} records, SHA-256: ${checksum})`,
           performedBy: 'VERCEL_CRON',
           timestamp: nowIso,
-          serverWriteToken: SERVER_WRITE_TOKEN,
         };
         if (adminDb) {
           await Promise.all([
@@ -1251,14 +1261,12 @@ export async function handleApiRequest(req: any, res: any) {
         } else {
           const cfg = getFirebaseServerConfig();
           const token = await getFirestoreAccessToken().catch(() => null);
-          if (token || cfg.apiKey) {
+          if (token) {
             const dbRoot = `projects/${cfg.projectId}/databases/${cfg.databaseId}/documents`;
-            const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-            const keyParam = !token && cfg.apiKey ? `?key=${encodeURIComponent(cfg.apiKey)}` : '';
-            const commitUrl = `https://firestore.googleapis.com/v1/${dbRoot}:commit${keyParam}`;
+            const commitUrl = `https://firestore.googleapis.com/v1/${dbRoot}:commit`;
             const commitRes = await fetch(commitUrl, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', ...authHeaders },
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
               body: JSON.stringify({
                 writes: [
                   {
